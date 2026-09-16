@@ -1,0 +1,40 @@
+node_modules/
+target/
+target-linux/
+dist/
+apps/desktop/src-tauri/gen/
+.tools/
+.runtime/
+*.log
+
+# Local secrets and machine-specific credentials
+.env
+.env.*
+!.env.example
+.npmrc
+.cargo/credentials
+.cargo/credentials.toml
+*.pem
+*.key
+*.pfx
+*.p12
+*.jks
+*.keystore
+**/rsa_key.priv
+
+# Runtime databases, diagnostics, and temporary files
+*.db
+*.sqlite
+*.sqlite3
+coverage/
+*.tmp
+*.bak
+*.orig
+
+# IDE and operating-system metadata
+.idea/
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+Desktop.ini

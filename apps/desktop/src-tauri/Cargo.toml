@@ -1,0 +1,16 @@
+[package]
+name = "tinc-desktop"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+[dependencies]
+tauri = { version = "2", features = [] }
+vpn-core = { path = "../../../crates/vpn-core" }
+vpn-ipc = { path = "../../../crates/vpn-ipc" }
+zeroize = "1"

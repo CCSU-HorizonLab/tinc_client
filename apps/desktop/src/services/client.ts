@@ -1,0 +1,32 @@
+import { invoke, isTauri } from '@tauri-apps/api/core';
+
+export interface Failure { code: string; message: string; retryable: boolean }
+export interface Identity { sid: string; net_name: string; node_ip: string }
+export type Phase = 'unconfigured'|'configuring'|'waiting_approval'|'stopped'|'starting'|'running'|'failed';
+export interface Status { phase: Phase; session: Identity|null; configured: Identity|null; process_running: boolean; connection: string; confirmation: string; stage: string; last_error: Failure|null }
+export interface LogEntry { time: number; message: string }
+export interface ConnectionView { label: string; detail: string }
+export type Command = 'login'|'configure'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout';
+export const labels: Record<Phase,string> = { unconfigured:'未配置', configuring:'配置中', waiting_approval:'等待后台确认', stopped:'已停止', starting:'启动中', running:'进程运行中', failed:'操作失败' };
+export function connectionView(status: Status|null): ConnectionView {
+  if (status?.connection === 'connected') return {label:'已验证连通',detail:'服务端 VPN 节点可经专用 TAP 路由到达'};
+  if (status?.connection === 'unreachable') return {label:'暂不可达',detail:'Tinc 仍在运行，Agent 将继续自动探测'};
+  if (status?.process_running) return {label:'正在连接',detail:'Tinc 已运行，正在等待隧道握手与连通性验证'};
+  return {label:'尚未验证',detail:'进程运行不代表 VPN 已连通'};
+}
+export function isHttpOrigin(value:string):boolean {
+  return value.trim().toLowerCase().startsWith('http://');
+}
+export function failure(error: unknown): Failure {
+  if (typeof error==='object' && error!==null && 'code' in error && 'message' in error) return error as Failure;
+  return { code:'desktop',message:'桌面接口调用失败，请检查本地服务并重试',retryable:true };
+}
+export async function call<T>(command: Command,args?:Record<string,unknown>):Promise<T> {
+  if (!isTauri()) throw {code:'desktop_required',message:'当前为浏览器预览。请通过 Tauri 桌面应用连接本地服务；此处不模拟 VPN 数据。',retryable:false};
+  return invoke<T>(command,args);
+}
+export function controls(status:Status|null,busy:boolean) {
+  const running=!!status?.process_running;
+  const working=busy || status?.phase==='configuring' || status?.phase==='starting';
+  return {configure:!!status?.session&&!running&&!working,start:!!status?.configured&&!running&&!working,stop:running&&!working};
+}

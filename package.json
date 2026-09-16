@@ -1,0 +1,17 @@
+{
+  "name": "tinc-client-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/desktop"],
+  "scripts": {
+    "dev": "npm run dev --workspace apps/desktop",
+    "build": "npm run build --workspace apps/desktop",
+    "desktop:dev": "npm run tauri --workspace apps/desktop -- dev",
+    "desktop:build": "npm run tauri --workspace apps/desktop -- build",
+    "desktop:build:windows": "powershell -NoProfile -File scripts/build/windows.ps1",
+    "test:ui": "npm run test --workspace apps/desktop",
+    "test:packaging": "node scripts/test/packaging-preflight.mjs",
+    "test:linux": "powershell -NoProfile -File scripts/test/linux-container.ps1",
+    "test:e2e": "node scripts/test/e2e-local.mjs"
+  }
+}
