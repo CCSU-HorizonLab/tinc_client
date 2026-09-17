@@ -26,9 +26,13 @@ for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',
   'Get-AuthenticodeSignature','VerifyOnly','Ensure-TapAdapter',
-  'Get-AdapterGuidValue','owner_windows_sid','New-Service','Wait-ServiceState','interface_prefix = 32'
+  'Get-AdapterGuidValue','New-Service','Wait-ServiceState','Wait-AgentPipe','installer.log','interface_prefix = 32'
 ]) assert.match(clientInstaller,new RegExp(expected));
 assert.doesNotMatch(clientInstaller,/InterfaceGuid\.Guid/,'Get-NetAdapter exposes InterfaceGuid as a string on supported Windows builds');
+assert.match(clientInstaller,/\$SettingsPath\s*=\s*Join-Path \$DataRoot "settings\.json"/,'Installer must write the exact settings file read by the Windows Agent');
+assert.doesNotMatch(clientInstaller,/agent-settings\.json|owner_windows_sid/,'Installer must not use obsolete Agent settings names');
+assert.match(clientInstaller,/\n\s*owner = \$ownerSid/,'Installer settings must use the Rust Settings.owner contract');
+assert.match(clientInstaller,/expectedSettingNames = @\("data_dir", "interface", "interface_prefix", "owner", "tinc_binary"\)/,'Installer must verify the complete settings contract before starting the service');
 assert(clientInstaller.includes("O=OpenVPN Inc\\."),'Installer must constrain the TAP Authenticode signer');
 assert.match(clientUninstaller,/ProgramData\\TincClient[\s\S]*preserve/i,'Uninstaller must preserve user network data and key material');
 assert.match(clientUninstaller,/PathName -ne \$expectedCommand/,'Uninstaller must not delete a same-named unexpected service');

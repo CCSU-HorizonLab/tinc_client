@@ -1,0 +1,41 @@
+server:
+  port: ${SERVER_PORT:8081}
+
+spring:
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    driverClassName: com.mysql.cj.jdbc.Driver
+    druid:
+      master:
+        url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/tinclink?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai}
+        username: ${DB_USERNAME:tinclink}
+        password: ${DB_PASSWORD:CHANGE_ME}
+      slave:
+        enabled: false
+  redis:
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+    database: ${REDIS_DATABASE:0}
+    password: ${REDIS_PASSWORD:}
+
+token:
+  header: Authorization
+  secret: ${JWT_SECRET:CHANGE_ME_TO_AT_LEAST_32_RANDOM_BYTES}
+  expireTime: 30
+
+tinc:
+  runtime:
+    config-root: ${TINC_CONFIG_ROOT:/etc/tinc}
+    command-timeout-ms: 10000
+    ready-timeout-ms: 15000
+    use-helper: false
+    helper-use-sudo: false
+    file-owner: root
+    file-group: root
+  transport:
+    mode: local
+
+logging:
+  level:
+    com.ruoyi: info
+    org.springframework: warn

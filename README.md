@@ -1,6 +1,8 @@
-# Tinc Connect
+# Tinc Connect（TincLink Windows 客户端）
 
-Vue 3 + Tauri 2 + Rust 本地服务。当前是可构建的实现阶段项目，不是已经完成真实 VPN 联调的发行版。
+Vue 3 + Tauri 2 + Rust 本地服务。客户端已完成登录、严格配置包校验、RSA 密钥生成/复用、公钥上传、Tinc 生命周期管理、Windows TAP 地址与 `/32` 路由管理，以及基于 ICMP 的真实连通状态判定。
+
+当前仓库正在固化 `v1.0-competition-2026-rc1` 候选版本。已有开发机实机隧道连通记录，但干净 Windows 首装、卸载、重启和重装的 24 项验收尚未完成，因此不得将当前安装包标记为最终发行版。Linux 仅有代码与测试基础，Android 未实现。
 
 继续开发先读 [项目交接](docs/HANDOVER.md)，其中记录了实际验证结果、未完成事项和接手步骤。
 

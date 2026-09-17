@@ -1,0 +1,26 @@
+[Unit]
+Description=TincLink RuoYi backend
+Wants=network-online.target redis.service
+After=network-online.target redis.service mariadb.service mysqld.service firewalld.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tinclink/server
+EnvironmentFile=-/etc/tinclink/server.env
+ExecStart=/usr/bin/java -Xms256M -Xmx512M -jar /opt/tinclink/server/ruoyi-admin.jar --spring.config.additional-location=file:/opt/tinclink/server/application-example.yml
+User=root
+Group=root
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=90s
+TimeoutStopSec=30s
+SuccessExitStatus=143
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/etc/tinc /opt/tinclink/server
+
+[Install]
+WantedBy=multi-user.target

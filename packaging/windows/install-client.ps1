@@ -16,8 +16,9 @@ $ExpectedTapSha256 = "1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5
 $AgentRoot = Join-Path $env:ProgramFiles "TincClientAgent"
 $DataRoot = Join-Path $env:ProgramData "TincClient"
 $DataDirectory = Join-Path $DataRoot "data"
-$SettingsPath = Join-Path $DataRoot "agent-settings.json"
+$SettingsPath = Join-Path $DataRoot "settings.json"
 $InstallStatePath = Join-Path $DataRoot "install-state.json"
+$InstallLogPath = Join-Path $DataRoot "installer.log"
 
 $securityModule = Join-Path $PSHOME "Modules\Microsoft.PowerShell.Security\Microsoft.PowerShell.Security.psd1"
 if (-not (Test-Path -LiteralPath $securityModule -PathType Leaf)) {
@@ -88,6 +89,23 @@ function Wait-ServiceState {
     } while ((Get-Date) -lt $deadline)
 
     throw "Service $Name did not reach state $State within $TimeoutSeconds seconds."
+}
+
+function Wait-AgentPipe {
+    param([int]$TimeoutSeconds = 15)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $pipe = Get-ChildItem -LiteralPath "\\.\pipe\" -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "tinc-client-v1" } |
+            Select-Object -First 1
+        if ($null -ne $pipe) {
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    throw "Agent service is running but did not create the production IPC pipe within $TimeoutSeconds seconds. Check $InstallLogPath and Windows service status."
 }
 
 function Get-InteractiveOwnerSid {
@@ -282,11 +300,23 @@ if (-not (Test-IsAdministrator)) {
     throw "Administrator privileges are required to install the TAP driver and Windows service."
 }
 
+New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
+Set-ProtectedDirectoryAcl -Path $DataRoot
+$transcriptStarted = $false
+try {
+    Start-Transcript -LiteralPath $InstallLogPath -Append -Force | Out-Null
+    $transcriptStarted = $true
+} catch {
+    Write-Warning "Installer logging could not start at ${InstallLogPath}: $($_.Exception.Message)"
+}
+Write-Step "Installation log: $InstallLogPath"
+
 $ownerSid = Get-InteractiveOwnerSid
 $existingService = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
 $agentPath = Join-Path $AgentRoot "vpn-agent.exe"
 $expectedServiceCommand = '"' + $agentPath + '" --service'
 $serviceWasRunning = $false
+$serviceCreatedThisRun = $false
 
 if ($null -ne $existingService) {
     if ($existingService.PathName -ne $expectedServiceCommand) {
@@ -325,9 +355,20 @@ try {
         tinc_binary = $installedTincPath
         interface = $InterfaceName
         interface_prefix = 32
-        owner_windows_sid = $ownerSid
+        owner = $ownerSid
     }
     Write-JsonAtomically -Value $settings -Path $SettingsPath
+    $writtenSettings = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $settingNames = @($writtenSettings.PSObject.Properties.Name | Sort-Object)
+    $expectedSettingNames = @("data_dir", "interface", "interface_prefix", "owner", "tinc_binary")
+    if ((Compare-Object -ReferenceObject $expectedSettingNames -DifferenceObject $settingNames).Count -ne 0 -or
+        $writtenSettings.owner -ne $ownerSid -or
+        $writtenSettings.tinc_binary -ne $installedTincPath -or
+        $writtenSettings.data_dir -ne $DataDirectory -or
+        $writtenSettings.interface -ne $InterfaceName -or
+        $writtenSettings.interface_prefix -ne 32) {
+        throw "Generated Agent settings do not match the required settings.json contract."
+    }
 
     if ($null -eq $existingService) {
         Write-Step "Registering the Tinc Client Agent Windows service."
@@ -336,6 +377,7 @@ try {
             -DisplayName "Tinc Client Agent" `
             -Description "Privileged local service for Tinc Connect" `
             -StartupType Automatic | Out-Null
+        $serviceCreatedThisRun = $true
     } else {
         Set-Service -Name $ServiceName -StartupType Automatic
     }
@@ -364,13 +406,16 @@ try {
         adapter_guid = Get-AdapterGuidValue -Adapter $tapResult.Adapter
         adapter_pnp_id = $adapterPnpId
         adapter_created_by_installer = [bool]$tapResult.Created
-        owner_windows_sid = $ownerSid
+        owner = $ownerSid
     }
     Write-JsonAtomically -Value $installState -Path $InstallStatePath
 
     Write-Step "Starting and verifying the Agent service."
     Start-Service -Name $ServiceName
     Wait-ServiceState -Name $ServiceName -State "Running"
+    Wait-AgentPipe
+    Start-Sleep -Seconds 2
+    Wait-ServiceState -Name $ServiceName -State "Running" -TimeoutSeconds 5
     Assert-FileHash -Path $agentPath -ExpectedSha256 $manifest.agentSha256 -Label "installed Agent"
     Assert-FileHash -Path $installedTincPath -ExpectedSha256 $ExpectedTincSha256 -Label "installed Tinc"
 
@@ -381,6 +426,7 @@ try {
 
     Write-Step "Installation completed: desktop prerequisites, Agent service, Tinc, and TAP adapter are ready."
 } catch {
+    Write-Host "[Tinc Connect] ERROR: $($_.Exception.Message)"
     if ($serviceWasRunning -and $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
         try {
             Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -388,5 +434,17 @@ try {
             Write-Warning "The previous Agent service could not be restarted after installation failure."
         }
     }
+    if ($serviceCreatedThisRun) {
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+        & sc.exe delete $ServiceName | Out-Null
+    }
     throw
+} finally {
+    if ($transcriptStarted) {
+        try {
+            Stop-Transcript | Out-Null
+        } catch {
+            Write-Warning "Installer transcript could not be closed cleanly."
+        }
+    }
 }
