@@ -30,3 +30,19 @@ fn obsolete_windows_installer_owner_field_is_rejected() {
 
     assert!(serde_json::from_str::<Settings>(obsolete).is_err());
 }
+
+#[test]
+fn windows_installer_settings_must_not_have_a_utf8_bom() {
+    let json = br#"{
+        "data_dir":"C:\\ProgramData\\TincClient\\data",
+        "tinc_binary":"C:\\Program Files\\TincClientAgent\\tinc\\tincd.exe",
+        "interface":"tinc",
+        "interface_prefix":32,
+        "owner":"S-1-5-21-1001"
+    }"#;
+    let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+    with_bom.extend_from_slice(json);
+
+    assert!(serde_json::from_slice::<Settings>(json).is_ok());
+    assert!(serde_json::from_slice::<Settings>(&with_bom).is_err());
+}

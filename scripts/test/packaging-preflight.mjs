@@ -37,6 +37,8 @@ for(const variable of ['named','renamed','installedAdapter']){
   assert.match(clientInstaller,new RegExp(`\\$${variable} = @\\(Get-TincNamedAdapter\\)`),`${variable} must remain an array for zero, one, or multiple adapters under StrictMode`);
 }
 assert.match(clientInstaller,/@\(Compare-Object -ReferenceObject \$expectedSettingNames -DifferenceObject \$settingNames\)\.Count/,'Settings differences must remain an array under StrictMode');
+assert.match(clientInstaller,/\[IO\.File\]::WriteAllText\(\$temporaryPath, \$json, \(New-Object Text\.UTF8Encoding\(\$false\)\)\)/,'Installer JSON must be UTF-8 without BOM for Rust serde_json');
+assert.doesNotMatch(clientInstaller,/ConvertTo-Json[^\r\n|]*\|\s*Set-Content[^\r\n]*-Encoding UTF8/,'Windows PowerShell 5.1 Set-Content UTF8 adds a BOM that Rust rejects');
 assert(clientInstaller.includes("O=OpenVPN Inc\\."),'Installer must constrain the TAP Authenticode signer');
 assert.match(clientUninstaller,/ProgramData\\TincClient[\s\S]*preserve/i,'Uninstaller must preserve user network data and key material');
 assert.match(clientUninstaller,/PathName -ne \$expectedCommand/,'Uninstaller must not delete a same-named unexpected service');
@@ -66,6 +68,20 @@ foreach ($expected in @(0, 1, 2)) {
 }`;
   const cardinalityCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',cardinality],{encoding:'utf8'});
   assert.equal(cardinalityCheck.status,0,cardinalityCheck.stderr||cardinalityCheck.stdout);
+  const utf8NoBom=`
+$path = [IO.Path]::GetTempFileName()
+try {
+  $json = [ordered]@{ owner = 'S-1-5-21-1001' } | ConvertTo-Json
+  [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+  $bytes = [IO.File]::ReadAllBytes($path)
+  if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { throw 'Unexpected UTF-8 BOM.' }
+  $parsed = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($parsed.owner -ne 'S-1-5-21-1001') { throw 'JSON round trip failed.' }
+} finally {
+  [IO.File]::Delete($path)
+}`;
+  const utf8NoBomCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',utf8NoBom],{encoding:'utf8'});
+  assert.equal(utf8NoBomCheck.status,0,utf8NoBomCheck.stderr||utf8NoBomCheck.stdout);
 }
 if(process.platform!=='win32'){
   const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux/install-agent.sh')],{encoding:'utf8'});

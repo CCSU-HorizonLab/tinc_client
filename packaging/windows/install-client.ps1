@@ -251,7 +251,8 @@ function Write-JsonAtomically {
     )
 
     $temporaryPath = "$Path.new"
-    $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporaryPath -Encoding UTF8
+    $json = $Value | ConvertTo-Json -Depth 8
+    [IO.File]::WriteAllText($temporaryPath, $json, (New-Object Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
 
