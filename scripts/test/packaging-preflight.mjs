@@ -33,6 +33,10 @@ assert.match(clientInstaller,/\$SettingsPath\s*=\s*Join-Path \$DataRoot "setting
 assert.doesNotMatch(clientInstaller,/agent-settings\.json|owner_windows_sid/,'Installer must not use obsolete Agent settings names');
 assert.match(clientInstaller,/\n\s*owner = \$ownerSid/,'Installer settings must use the Rust Settings.owner contract');
 assert.match(clientInstaller,/expectedSettingNames = @\("data_dir", "interface", "interface_prefix", "owner", "tinc_binary"\)/,'Installer must verify the complete settings contract before starting the service');
+for(const variable of ['named','renamed','installedAdapter']){
+  assert.match(clientInstaller,new RegExp(`\\$${variable} = @\\(Get-TincNamedAdapter\\)`),`${variable} must remain an array for zero, one, or multiple adapters under StrictMode`);
+}
+assert.match(clientInstaller,/@\(Compare-Object -ReferenceObject \$expectedSettingNames -DifferenceObject \$settingNames\)\.Count/,'Settings differences must remain an array under StrictMode');
 assert(clientInstaller.includes("O=OpenVPN Inc\\."),'Installer must constrain the TAP Authenticode signer');
 assert.match(clientUninstaller,/ProgramData\\TincClient[\s\S]*preserve/i,'Uninstaller must preserve user network data and key material');
 assert.match(clientUninstaller,/PathName -ne \$expectedCommand/,'Uninstaller must not delete a same-named unexpected service');
@@ -48,6 +52,20 @@ if(process.platform==='win32'){
     const parsed=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',parser],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,script)}});
     assert.equal(parsed.status,0,`${script}: ${parsed.stderr||parsed.stdout}`);
   }
+  const cardinality=`
+Set-StrictMode -Version Latest
+function Get-MockedAdapters([int]$CaseCount) {
+  for ($index = 0; $index -lt $CaseCount; $index++) {
+    [pscustomobject]@{ Name = "adapter-$index" }
+  }
+}
+foreach ($expected in @(0, 1, 2)) {
+  $named = @(Get-MockedAdapters -CaseCount $expected)
+  if ($named.Count -ne $expected) { throw "Expected $expected adapters, got $($named.Count)." }
+  if ($expected -gt 0 -and $named[0].Name -ne 'adapter-0') { throw 'Array indexing changed adapter semantics.' }
+}`;
+  const cardinalityCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',cardinality],{encoding:'utf8'});
+  assert.equal(cardinalityCheck.status,0,cardinalityCheck.stderr||cardinalityCheck.stdout);
 }
 if(process.platform!=='win32'){
   const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux/install-agent.sh')],{encoding:'utf8'});

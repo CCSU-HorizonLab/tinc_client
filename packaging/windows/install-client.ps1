@@ -188,7 +188,7 @@ function Find-TapInstallTool {
 function Ensure-TapAdapter {
     param([string]$TapInstaller)
 
-    $named = Get-TincNamedAdapter
+    $named = @(Get-TincNamedAdapter)
     if ($named.Count -gt 1) {
         throw "Multiple adapters are named '$InterfaceName'. Resolve the name collision before installing."
     }
@@ -236,7 +236,7 @@ function Ensure-TapAdapter {
     }
 
     Rename-NetAdapter -InputObject $adapter -NewName $InterfaceName -Confirm:$false
-    $renamed = Get-TincNamedAdapter
+    $renamed = @(Get-TincNamedAdapter)
     if ($renamed.Count -ne 1) {
         throw "The TAP adapter could not be verified after renaming it to '$InterfaceName'."
     }
@@ -361,7 +361,7 @@ try {
     $writtenSettings = Get-Content -LiteralPath $SettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $settingNames = @($writtenSettings.PSObject.Properties.Name | Sort-Object)
     $expectedSettingNames = @("data_dir", "interface", "interface_prefix", "owner", "tinc_binary")
-    if ((Compare-Object -ReferenceObject $expectedSettingNames -DifferenceObject $settingNames).Count -ne 0 -or
+    if (@(Compare-Object -ReferenceObject $expectedSettingNames -DifferenceObject $settingNames).Count -ne 0 -or
         $writtenSettings.owner -ne $ownerSid -or
         $writtenSettings.tinc_binary -ne $installedTincPath -or
         $writtenSettings.data_dir -ne $DataDirectory -or
@@ -419,7 +419,7 @@ try {
     Assert-FileHash -Path $agentPath -ExpectedSha256 $manifest.agentSha256 -Label "installed Agent"
     Assert-FileHash -Path $installedTincPath -ExpectedSha256 $ExpectedTincSha256 -Label "installed Tinc"
 
-    $installedAdapter = Get-TincNamedAdapter
+    $installedAdapter = @(Get-TincNamedAdapter)
     if ($installedAdapter.Count -ne 1 -or $installedAdapter[0].InterfaceDescription -notmatch '^TAP-(Windows|Win32) Adapter V9') {
         throw "The dedicated '$InterfaceName' TAP adapter could not be verified after installation."
     }
