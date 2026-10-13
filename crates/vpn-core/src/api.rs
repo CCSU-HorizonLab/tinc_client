@@ -58,6 +58,114 @@ fn network(e: reqwest::Error) -> Error {
         )
     }
 }
+pub fn validate_access_code(value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.len() != 12 {
+        return Err(Error::protocol(
+            "接入码格式无效，必须为 12 位，例如 TL-7K9M-2Q4F",
+        ));
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    if !bytes.starts_with(b"TL-") || bytes[7] != b'-' {
+        return Err(Error::protocol(
+            "接入码格式无效，必须以 TL- 开头并包含连字符，例如 TL-7K9M-2Q4F",
+        ));
+    }
+    const VALID_CHARS: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+    for (i, &b) in bytes.iter().enumerate() {
+        if i < 3 || i == 7 {
+            continue;
+        }
+        if !VALID_CHARS.contains(&b) {
+            return Err(Error::protocol(
+                "接入码包含无效字符，支持字符集为 23456789ABCDEFGHJKMNPQRSTUVWXYZ",
+            ));
+        }
+    }
+    Ok(upper)
+}
+
+pub fn map_backend_error(code: &str, fallback_msg: Option<&str>) -> Error {
+    match code {
+        "CLIENT_CREDENTIAL_INVALID" => Error::new(
+            "credential_invalid",
+            fallback_msg.unwrap_or("接入码或密码错误，请核对后重试"),
+            false,
+        ),
+        "CLIENT_LEGACY_LOGIN_AMBIGUOUS" => Error::new(
+            "login_ambiguous",
+            fallback_msg.unwrap_or("检测到多个同名节点，请使用接入码登录"),
+            false,
+        ),
+        "CLIENT_SID_INVALID" => Error::new(
+            "protocol",
+            fallback_msg.unwrap_or("节点标识格式无效"),
+            false,
+        ),
+        "CLIENT_NETWORK_IP_INVALID" => Error::new(
+            "assignment_missing",
+            fallback_msg.unwrap_or("节点网络 IP 配置无效，请联系管理员"),
+            false,
+        ),
+        "CLIENT_NETWORK_NOT_FOUND" => Error::new(
+            "assignment_missing",
+            fallback_msg.unwrap_or("后台找不到节点或网络关联，请联系管理员检查绑定关系"),
+            false,
+        ),
+        "SYSTEM_ERROR" => Error::new(
+            "server_error",
+            fallback_msg.unwrap_or("服务端内部错误，可以稍后重试"),
+            true,
+        ),
+        "CLIENT_TOKEN_INVALID" => {
+            Error::new("auth_expired", "鉴权失败或会话已失效，请重新登录", false)
+        }
+        "CLIENT_SESSION_UNAVAILABLE" => Error::new(
+            "session_unavailable",
+            "后台会话服务暂时不可用，可以稍后重试",
+            true,
+        ),
+        "GATEWAY_HOST_UNAVAILABLE" | "GATEWAY_UNAVAILABLE" => Error::new(
+            "gateway_unavailable",
+            "网关配置暂时不可用，请联系管理员检查网关",
+            true,
+        ),
+        "GATEWAY_KEY_APPLY_FAILED" => Error::new(
+            "gateway_apply",
+            "网关公钥写入或重载失败，旧配置已保留，可以重试",
+            true,
+        ),
+        "CLIENT_PUBLIC_KEY_INVALID" => Error::new(
+            "key_rejected",
+            "后台拒绝本机公钥格式，请联系管理员核对客户端与版本",
+            false,
+        ),
+        "CLIENT_NODE_NOT_FOUND" => Error::new(
+            "assignment_missing",
+            "后台找不到节点或网络关联，请联系管理员检查绑定关系",
+            false,
+        ),
+        "CLIENT_NODE_REVOKED" => Error::new(
+            "node_revoked",
+            "该节点已被后台撤销，VPN 已停止；本机私钥将保留但不能继续连接",
+            false,
+        ),
+        "CLIENT_CONTENT_TYPE_INVALID" | "CLIENT_REQUEST_INVALID" | "CLIENT_ACTION_INVALID" => {
+            Error::new(
+                "protocol",
+                "客户端请求与后台契约不一致，请联系管理员核对版本",
+                false,
+            )
+        }
+        _ => Error::new(
+            "server_error",
+            fallback_msg.unwrap_or("服务端返回未知业务错误"),
+            false,
+        ),
+    }
+}
+
 async fn response_error(mut response: reqwest::Response) -> Error {
     let status = response.status().as_u16();
     if matches!(status, 401 | 403) {
@@ -90,48 +198,14 @@ async fn response_error(mut response: reqwest::Response) -> Error {
     } else {
         None
     };
-    match code.as_deref() {
-        Some("CLIENT_TOKEN_INVALID") => {
-            Error::new("auth_expired", "鉴权失败或会话已失效，请重新登录", false)
-        }
-        Some("CLIENT_SESSION_UNAVAILABLE") => Error::new(
-            "session_unavailable",
-            "后台会话服务暂时不可用，可以稍后重试",
-            true,
-        ),
-        Some("GATEWAY_HOST_UNAVAILABLE") | Some("GATEWAY_UNAVAILABLE") => Error::new(
-            "gateway_unavailable",
-            "网关配置暂时不可用，请联系管理员检查网关",
-            true,
-        ),
-        Some("GATEWAY_KEY_APPLY_FAILED") => Error::new(
-            "gateway_apply",
-            "网关公钥写入或重载失败，旧配置已保留，可以重试",
-            true,
-        ),
-        Some("CLIENT_PUBLIC_KEY_INVALID") => Error::new(
-            "key_rejected",
-            "后台拒绝本机公钥格式，请联系管理员核对客户端与后端版本",
-            false,
-        ),
-        Some("CLIENT_NODE_NOT_FOUND") | Some("CLIENT_NETWORK_NOT_FOUND") => Error::new(
-            "assignment_missing",
-            "后台找不到节点或网络关联，请联系管理员检查绑定关系",
-            false,
-        ),
-        Some("CLIENT_CONTENT_TYPE_INVALID")
-        | Some("CLIENT_REQUEST_INVALID")
-        | Some("CLIENT_ACTION_INVALID")
-        | Some("CLIENT_SID_INVALID") => Error::new(
-            "protocol",
-            "客户端请求与后台契约不一致，请联系管理员核对版本",
-            false,
-        ),
-        _ => Error::new(
+    if let Some(code) = code.as_deref() {
+        map_backend_error(code, None)
+    } else {
+        Error::new(
             "http",
             format!("服务端返回 HTTP {status}"),
             status >= 500 || status == 429,
-        ),
+        )
     }
 }
 async fn post(
@@ -171,11 +245,36 @@ async fn post(
     })
 }
 impl Session {
-    pub async fn login(server: &str, sid: &str, password: &str, allow_http: bool) -> Result<Self> {
-        identifier(sid)?;
-        if sid.eq_ignore_ascii_case("server_master") {
-            return Err(Error::protocol("server_master 为协议保留的服务端主机名"));
-        }
+    pub async fn login(
+        server: &str,
+        access_code: Option<&str>,
+        sid: Option<&str>,
+        password: &str,
+        allow_http: bool,
+    ) -> Result<Self> {
+        let normalized_access_code = match access_code {
+            Some(code) if !code.trim().is_empty() => Some(validate_access_code(code)?),
+            _ => None,
+        };
+
+        let body = if let Some(code) = &normalized_access_code {
+            json!({
+                "accessCode": code,
+                "password": password
+            })
+        } else if let Some(s) = sid.filter(|s| !s.trim().is_empty()) {
+            identifier(s)?;
+            if s.eq_ignore_ascii_case("server_master") {
+                return Err(Error::protocol("server_master 为协议保留的服务端主机名"));
+            }
+            json!({
+                "sid": s,
+                "password": password
+            })
+        } else {
+            return Err(Error::protocol("请提供接入码或节点名称"));
+        };
+
         if password.is_empty() || password.len() > 1024 {
             return Err(Error::protocol("密码不能为空或超过长度限制"));
         }
@@ -184,22 +283,22 @@ impl Session {
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(20))
+            // RSA-3072 generation can outlive a server's keep-alive window. Drop
+            // idle pooled sockets early instead of reusing a half-closed one for
+            // the subsequent public-key upload.
+            .pool_idle_timeout(Duration::from_secs(2))
             .build()
             .map_err(network)?;
-        let response = post(
-            &client,
-            &origin,
-            "/api/tinc/client/login",
-            json!({"sid":sid,"password":password}),
-            64 * 1024,
-        )
-        .await?;
+        let response = post(&client, &origin, "/api/tinc/client/login", body, 64 * 1024).await?;
         let v: Value = serde_json::from_slice(&response.body)
             .map_err(|_| Error::protocol("登录响应不是有效 JSON"))?;
         if v == json!(0) || v["status"] == json!(0) {
+            if let Some(code) = v["code"].as_str().filter(|s| !s.is_empty()) {
+                return Err(map_backend_error(code, v["msg"].as_str()));
+            }
             return Err(Error::new(
                 "auth_failed",
-                "登录被拒绝，请核对节点名、密码及后台节点关联",
+                "登录被拒绝，请核对接入码、密码及后台节点关联",
                 false,
             ));
         }
@@ -213,16 +312,35 @@ impl Session {
                 .map(str::to_owned)
                 .ok_or_else(|| Error::protocol("登录响应缺少 sid/token/net_name/node_ip"))
         };
-        let identity = Identity {
-            sid: field("sid")?,
-            net_name: field("net_name")?,
-            node_ip: field("node_ip")?,
-        };
-        identifier(&identity.sid)?;
-        identifier(&identity.net_name)?;
-        if identity.sid != sid {
-            return Err(Error::protocol("登录返回的节点名与请求不一致"));
+        let returned_sid = field("sid")?;
+        identifier(&returned_sid)?;
+        let returned_net_name = field("net_name")?;
+        identifier(&returned_net_name)?;
+        let returned_access_code = v["access_code"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+
+        if let Some(expected_code) = &normalized_access_code {
+            if let Some(actual_code) = &returned_access_code {
+                if !actual_code.eq_ignore_ascii_case(expected_code) {
+                    return Err(Error::protocol("登录返回的接入码与请求不一致"));
+                }
+            }
+        } else if let Some(expected_sid) = sid {
+            if returned_sid != expected_sid {
+                return Err(Error::protocol("登录返回的节点名与请求不一致"));
+            }
         }
+
+        let identity = Identity {
+            sid: returned_sid,
+            net_name: returned_net_name,
+            node_ip: field("node_ip")?,
+            node_id: v["node_id"].as_u64(),
+            network_id: v["network_id"].as_u64(),
+            access_code: returned_access_code.or(normalized_access_code),
+        };
         identity
             .node_ip
             .parse::<std::net::Ipv4Addr>()
@@ -278,5 +396,16 @@ impl Session {
         }
         String::from_utf8(response.body)
             .map_err(|_| Error::protocol("公钥上传响应不是 UTF-8 主机配置"))
+    }
+    pub async fn keepalive(&self) -> Result<()> {
+        post(
+            &self.client,
+            &self.origin,
+            "/api/tinc/client/keepalive",
+            json!({"sid":self.identity.sid,"token":self.token.as_str()}),
+            64 * 1024,
+        )
+        .await
+        .map(|_| ())
     }
 }

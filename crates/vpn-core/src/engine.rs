@@ -34,6 +34,7 @@ const ADAPTER_STATE_VERSION: u8 = 1;
 const ADAPTER_STATE_FILE: &str = "adapter-state.json";
 const CONNECTIVITY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -136,6 +137,7 @@ pub struct Engine {
     probe_target: Option<std::net::Ipv4Addr>,
     last_probe: Option<tokio::time::Instant>,
     probe_started_at: Option<tokio::time::Instant>,
+    last_keepalive: Option<tokio::time::Instant>,
     #[cfg(unix)]
     adapter_link_touched: bool,
     #[cfg(windows)]
@@ -155,8 +157,26 @@ impl Engine {
         let mut status = Status::default();
         if let Some(a) = &active {
             status.configured = Some(a.identity.clone());
-            status.phase = Phase::Stopped;
-            status.stage = "已恢复本地配置，VPN 未启动".into();
+            if a.revoked {
+                status.phase = Phase::Failed;
+                status.stage = "已恢复被撤销的本地配置；需要管理员重新分配节点".into();
+                status.last_error = Some(Error::new(
+                    "node_revoked",
+                    "该节点已被后台撤销；本机私钥已保留但不能继续连接",
+                    false,
+                ));
+            } else if keys::candidate_exists(&settings.data_dir, &a.profile) {
+                status.phase = Phase::Failed;
+                status.stage = "检测到未完成的密钥轮换；请重新登录并更新配置".into();
+                status.last_error = Some(Error::new(
+                    "key_rotation_incomplete",
+                    "上次密钥轮换未完成；已阻止连接，请重新登录并更新配置完成恢复",
+                    false,
+                ));
+            } else {
+                status.phase = Phase::Stopped;
+                status.stage = "已恢复本地配置，VPN 未启动；请重新登录后连接".into();
+            }
         }
         Ok(Self {
             status: Arc::new(RwLock::new(status)),
@@ -173,6 +193,7 @@ impl Engine {
             probe_target: None,
             last_probe: None,
             probe_started_at: None,
+            last_keepalive: None,
             #[cfg(unix)]
             adapter_link_touched: adapter_state
                 .as_ref()
@@ -205,8 +226,30 @@ impl Engine {
     }
     pub async fn fail(&mut self, error: Error) -> Reply {
         if error.code == "auth_expired" {
+            if self.child.is_some() || self.adapter_cleanup_pending() {
+                if let Err(cleanup_error) = self.stop().await {
+                    self.log(&cleanup_error.message).await;
+                }
+            }
             self.session = None;
             self.status.write().await.session = None;
+        } else if error.code == "node_revoked" {
+            // Revocation is a node-lifecycle event, not merely a failed HTTP request.
+            // Persist it locally so a service restart cannot revive the old profile.
+            if let Err(cleanup_error) = self.stop().await {
+                self.log(&cleanup_error.message).await;
+            }
+            if let Some(active) = self.active.as_mut() {
+                active.revoked = true;
+                if let Err(write_error) = config::write_active(&self.settings.data_dir, active) {
+                    self.log(&write_error.message).await;
+                }
+            }
+            self.session = None;
+            let mut status = self.status.write().await;
+            status.session = None;
+            status.phase = Phase::Failed;
+            status.stage = error.message.clone();
         }
         let mut status = self.status.write().await;
         if !status.process_running {
@@ -229,13 +272,37 @@ impl Engine {
         match request {
             Request::Login {
                 server,
+                access_code,
                 sid,
                 password,
                 allow_http,
             } => {
-                self.session = None;
-                self.status.write().await.session = None;
-                let session = Session::login(&server, &sid, &password, allow_http).await?;
+                let session = Session::login(
+                    &server,
+                    access_code.as_deref(),
+                    sid.as_deref(),
+                    &password,
+                    allow_http,
+                )
+                .await?;
+                if self.child.is_some() {
+                    let active = self.active.as_ref().ok_or_else(|| {
+                        Error::new(
+                            "profile_mismatch",
+                            "VPN 正在运行，但活动配置不存在；请先停止 VPN",
+                            false,
+                        )
+                    })?;
+                    if keys::profile_id(&session.origin, &session.identity) != active.profile
+                        || session.identity != active.identity
+                    {
+                        return Err(Error::new(
+                            "profile_mismatch",
+                            "VPN 正在运行，不能切换到其他节点；请先停止 VPN",
+                            false,
+                        ));
+                    }
+                }
                 {
                     let mut s = self.status.write().await;
                     s.session = Some(session.identity.clone());
@@ -252,12 +319,18 @@ impl Engine {
                 self.log("登录成功，已取得后台分配的网络与节点地址").await;
             }
             Request::Configure => self.configure().await?,
+            Request::RotateKey => self.rotate_key().await?,
             Request::StartVpn => self.start().await?,
             Request::StopVpn => self.stop().await?,
             Request::Logout => {
+                if self.child.is_some() || self.adapter_cleanup_pending() {
+                    self.stop().await?;
+                }
                 self.session = None;
                 self.status.write().await.session = None;
-                self.log("本地会话已清除；服务端未提供撤销接口").await;
+                self.last_keepalive = None;
+                self.log("VPN 已停止，本地会话已清除；服务端未提供撤销接口")
+                    .await;
             }
             Request::GetStatus | Request::GetRecentLogs => (),
         }
@@ -277,6 +350,8 @@ impl Engine {
             .ok_or_else(|| Error::new("auth_required", "请先登录", false))?;
         let identity = session.identity.clone();
         let profile = keys::profile_id(&session.origin, &identity);
+        let legacy_profile = keys::legacy_profile_id(&session.origin, &identity);
+        keys::migrate_legacy_key(&self.settings.data_dir, &legacy_profile, &profile)?;
         self.stage(Phase::Configuring, "正在下载并校验配置").await;
         // Preserve the observed old-client protocol: download precedes key exchange.
         let archive = session.download().await?;
@@ -295,9 +370,9 @@ impl Engine {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         hide(&mut worker);
-        let output = tokio::time::timeout(Duration::from_secs(60), worker.output())
+        let output = tokio::time::timeout(Duration::from_secs(120), worker.output())
             .await
-            .map_err(|_| Error::new("key_timeout", "密钥生成超过 60 秒，已终止；可重试", true))?
+            .map_err(|_| Error::new("key_timeout", "密钥生成超过 120 秒，已终止；可重试", true))?
             .map_err(|_| Error::new("key_generation", "无法启动本机密钥生成子进程", true))?;
         if !output.status.success() {
             return Err(Error::new(
@@ -324,6 +399,7 @@ impl Engine {
             &master,
         )?;
         self.active = Some(active);
+        keys::discard_candidate(&self.settings.data_dir, &profile)?;
         {
             let mut s = self.status.write().await;
             s.configured = Some(identity);
@@ -331,6 +407,111 @@ impl Engine {
             s.confirmation = "ready".into();
         }
         self.stage(Phase::Stopped, "配置已应用；服务端网络已确认就绪")
+            .await;
+        Ok(())
+    }
+
+    async fn rotate_key(&mut self) -> Result<()> {
+        if self.child.is_some() || self.adapter_cleanup_pending() {
+            return Err(Error::new("busy", "请先停止 VPN，再执行安全换钥", true));
+        }
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| Error::new("auth_required", "请先重新登录当前节点", false))?;
+        let identity = session.identity.clone();
+        let profile = keys::profile_id(&session.origin, &identity);
+        let active = self
+            .active
+            .clone()
+            .ok_or_else(|| Error::new("not_configured", "请先完成配置", false))?;
+        if active.profile != profile || active.identity != identity || active.revoked {
+            return Err(Error::new(
+                "profile_mismatch",
+                "当前登录节点与活动配置不一致，不能换钥",
+                false,
+            ));
+        }
+        if keys::candidate_exists(&self.settings.data_dir, &profile) {
+            return Err(Error::new(
+                "key_rotation_incomplete",
+                "检测到未完成的密钥轮换；请先更新配置完成恢复",
+                false,
+            ));
+        }
+
+        self.stage(Phase::Configuring, "正在校验换钥配置").await;
+        let archive = session.download().await?;
+        let validated = config::validate_zip(&archive, &identity, &self.settings.interface)?;
+        let old_public = keys::ensure_key(&self.settings.data_dir, &profile, &identity)?;
+        let candidate = keys::generate_candidate(&identity)?;
+        keys::store_candidate(
+            &self.settings.data_dir,
+            &profile,
+            candidate.private_pem.as_bytes(),
+        )?;
+        self.stage(Phase::Configuring, "正在上传候选公钥").await;
+        let master = match session.upload(&candidate.public_host).await {
+            Ok(master) => master,
+            Err(error) => {
+                let _ = keys::discard_candidate(&self.settings.data_dir, &profile);
+                return Err(error);
+            }
+        };
+        if let Err(error) = config::server_host(&master) {
+            let _ = keys::discard_candidate(&self.settings.data_dir, &profile);
+            if session.upload(&old_public).await.is_err() {
+                return Err(Error::new(
+                    "key_rotation_rollback_failed",
+                    "换钥响应校验失败，且服务端旧公钥回滚失败；已保留旧私钥，请联系管理员",
+                    false,
+                ));
+            }
+            return Err(error);
+        }
+        let old_private = match keys::activate_candidate(&self.settings.data_dir, &profile) {
+            Ok(key) => key,
+            Err(error) => {
+                let _ = keys::discard_candidate(&self.settings.data_dir, &profile);
+                if session.upload(&old_public).await.is_err() {
+                    return Err(Error::new(
+                        "key_rotation_rollback_failed",
+                        "候选私钥激活失败，且服务端旧公钥回滚失败；请联系管理员",
+                        false,
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let applied = config::apply(
+            &self.settings.data_dir,
+            validated,
+            &identity,
+            &profile,
+            &candidate.public_host,
+            &master,
+        );
+        let new_active = match applied {
+            Ok(active) => active,
+            Err(error) => {
+                let local_rollback =
+                    keys::replace_private_key(&self.settings.data_dir, &profile, &old_private);
+                let server_rollback = session.upload(&old_public).await;
+                if local_rollback.is_err() || server_rollback.is_err() {
+                    return Err(Error::new(
+                        "key_rotation_rollback_failed",
+                        "换钥本地提交失败，且旧密钥状态未能完整回滚；请勿重试连接并联系管理员",
+                        false,
+                    ));
+                }
+                keys::discard_candidate(&self.settings.data_dir, &profile)?;
+                return Err(error);
+            }
+        };
+        self.active = Some(new_active);
+        keys::discard_candidate(&self.settings.data_dir, &profile)?;
+        self.status.write().await.configured = Some(identity);
+        self.stage(Phase::Stopped, "密钥已安全轮换；服务端网络已确认就绪")
             .await;
         Ok(())
     }
@@ -373,6 +554,21 @@ impl Engine {
         {
             self.probe_connection().await;
         }
+        if self.child.is_some()
+            && self
+                .last_keepalive
+                .is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
+        {
+            if let Some(session) = self.session.as_ref() {
+                self.last_keepalive = Some(tokio::time::Instant::now());
+                let keepalive = session.keepalive().await;
+                if let Err(error) = keepalive {
+                    if error.code == "node_revoked" || error.code == "auth_expired" {
+                        return Err(error);
+                    }
+                }
+            }
+        }
         Ok(())
     }
     async fn start(&mut self) -> Result<()> {
@@ -390,6 +586,34 @@ impl Engine {
             .active
             .clone()
             .ok_or_else(|| Error::new("not_configured", "请先完成配置", false))?;
+        if active.revoked {
+            return Err(Error::new(
+                "node_revoked",
+                "该节点已被后台撤销，不能重新连接",
+                false,
+            ));
+        }
+        if keys::candidate_exists(&self.settings.data_dir, &active.profile) {
+            return Err(Error::new(
+                "key_rotation_incomplete",
+                "检测到未完成的密钥轮换；请先重新登录并更新配置",
+                false,
+            ));
+        }
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| Error::new("auth_required", "启动前请重新登录当前节点", false))?;
+        if keys::profile_id(&session.origin, &session.identity) != active.profile
+            || session.identity != active.identity
+        {
+            return Err(Error::new(
+                "profile_mismatch",
+                "当前登录节点与活动配置不一致，请先应用对应配置",
+                false,
+            ));
+        }
+        session.keepalive().await?;
         if !self.settings.tinc_binary.is_file() {
             return Err(Error::new(
                 "tinc_missing",
@@ -1042,8 +1266,12 @@ mod adapter_state_tests {
                 sid: "client_1".into(),
                 net_name: "office".into(),
                 node_ip: "10.42.0.2".into(),
+                node_id: None,
+                network_id: None,
+                access_code: None,
             },
             profile: "a".repeat(64),
+            revoked: false,
         }
     }
 

@@ -48,6 +48,9 @@ fn run_key_worker(args: &[String]) {
             sid: args[4].clone(),
             net_name: args[5].clone(),
             node_ip: args[6].clone(),
+            node_id: None,
+            network_id: None,
+            access_code: None,
         };
         identifier(&identity.sid)?;
         identifier(&identity.net_name)?;

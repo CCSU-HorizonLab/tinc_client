@@ -55,13 +55,14 @@ function zip(files){
 }
 await mkdir(join(root,'.runtime'),{recursive:true});const work=await mkdtemp(join(root,'.runtime/e2e-'));
 const publicKey=generateKeyPairSync('rsa',{modulusLength:2048,publicKeyEncoding:{type:'pkcs1',format:'pem'},privateKeyEncoding:{type:'pkcs1',format:'pem'}}).publicKey;
-let mode='ok',uploads=0;const uploaded=[];let releaseDownload;
+ let mode='ok',uploads=0,failNextUpload=false;const uploaded=[];let releaseDownload;
 const backend=createServer(async(req,res)=>{
  try{
   const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));
   if(req.url==='/api/tinc/client/login'){
    if(body.password!=='fixture-password'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({status:0,msg:'rejected'}));}
-   assert.deepEqual(Object.keys(body).sort(),['password','sid']);return res.end(JSON.stringify({status:1,sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2'}));
+   if(body.accessCode){assert.deepEqual(Object.keys(body).sort(),['accessCode','password']);assert.equal(body.accessCode,'TL-7K9M-2Q4F');return res.end(JSON.stringify({status:1,access_code:'TL-7K9M-2Q4F',sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20}));}
+   assert.deepEqual(Object.keys(body).sort(),['password','sid']);return res.end(JSON.stringify({status:1,sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20}));
   }
   if(req.url==='/api/tinc/client/config/download'){
    assert.deepEqual(body,{sid:'client_a',token:'fixture-token'});
@@ -71,8 +72,13 @@ const backend=createServer(async(req,res)=>{
   }
   if(req.url==='/api/tinc/client/key/upload'){
    assert.deepEqual(Object.keys(body).sort(),['action','content','sid','token']);assert.equal(body.sid,'client_a');assert.equal(body.token,'fixture-token');assert.equal(body.action,'exchangeFile');assert(body.content.startsWith('Subnet = 10.42.0.2/32\n\n-----BEGIN RSA PUBLIC KEY-----\n'));assert(!body.content.includes('PRIVATE KEY'));uploads++;uploaded.push(body.content);
-   if(uploads===1){res.statusCode=503;return res.end('fixture upload failure');}
+    if(uploads===1||failNextUpload){failNextUpload=false;res.statusCode=503;return res.end('fixture upload failure');}
    res.setHeader('Content-Type','text/plain; charset=UTF-8');res.setHeader('Cache-Control','no-store');return res.end(`Address = 127.0.0.1\nSubnet = 10.42.0.1/32\n${publicKey}`);
+  }
+  if(req.url==='/api/tinc/client/keepalive'){
+   assert.deepEqual(body,{sid:'client_a',token:'fixture-token'});res.setHeader('Content-Type','application/json');
+   if(mode==='revoked'){res.statusCode=410;return res.end(JSON.stringify({code:'CLIENT_NODE_REVOKED',message:'revoked by fixture'}));}
+   return res.end(JSON.stringify({status:'success'}));
   }
   res.statusCode=404;res.end('unexpected endpoint');
  }catch(e){res.statusCode=500;res.end('fixture assertion failed');console.error(e);}
@@ -83,17 +89,22 @@ let child;
 async function startAgent(){child=spawn(binary,['--dev',join(work,'settings.json')],{windowsHide:true,stdio:['ignore','ignore','pipe'],env:{...process.env,TINC_CLIENT_DEV_INSTANCE:ipcInstance}});child.stderr.on('data',c=>process.stderr.write(c));for(let i=0;i<100;i++){if(child.exitCode!==null)throw new Error(`agent exited ${child.exitCode}`);try{const reply=await rpc({command:'get_status'});if(reply.kind==='status')return reply;}catch{}await delay(100);}throw new Error('agent did not start');}
 async function stopAgent(){if(child&&child.exitCode===null){const stopped=once(child,'exit');child.kill();await stopped;}}
 async function ok(command,extra={}){const r=await rpc({command,...extra});assert.equal(r.kind,'status',JSON.stringify(r));return r.data;}
-async function login(password='fixture-password'){return rpc({command:'login',server:url,sid:'client_a',password,allow_http:true});}
+async function login(password='fixture-password'){return rpc({command:'login',server:url,access_code:'TL-7K9M-2Q4F',password,allow_http:true});}
 const passed=[];function pass(label){passed.push(label);console.log(`PASS ${label}`);}
 try{
  assert.equal((await startAgent()).data.phase,'unconfigured');pass('agent starts with actual unconfigured state');
  if(desktopMode){await openDesktop();assert.equal((await rpc({command:'get_status'})).kind,'status');pass('real Tauri WebView2 renders and calls authenticated native IPC');}
  assert.equal((await login('wrong')).data.code,'auth_failed');pass('authentication rejection surfaces');
- assert.equal((await login()).kind,'status');
+  assert.equal((await login()).kind,'status');
+  assert.equal((await login('wrong')).data.code,'auth_failed');assert.equal((await ok('get_status')).session.sid,'client_a');pass('failed re-login preserves the authenticated session');
  assert.equal((await rpc({command:'configure'})).data.code,'http');pass('upload failure is not configuration success');
- const profile=(await readdir(join(work,'data/keys')))[0],privatePath=join(work,'data/keys',profile,'rsa_key.priv');
+  const profile=(await readdir(join(work,'data/keys')))[0],privatePath=join(work,'data/keys',profile,'rsa_key.priv'),candidatePath=join(work,'data/keys',profile,'rsa_key.candidate');
  const hash=async()=>createHash('sha256').update(await readFile(privatePath)).digest('hex');const before=await hash();
- assert.equal((await ok('configure')).phase,'stopped');assert.equal(await hash(),before);assert.equal(uploaded[0],uploaded[1]);pass('retry reuses real RSA private key and identical public upload');
+  assert.equal((await ok('configure')).phase,'stopped');assert.equal(await hash(),before);assert.equal(uploaded[0],uploaded[1]);pass('retry reuses real RSA private key and identical public upload');
+  assert.equal((await ok('logout')).session,null);assert.equal((await login()).kind,'status');assert.equal(await hash(),before);pass('logout and login reuse the same profile private key');
+  failNextUpload=true;const failedRotation=await rpc({command:'rotate_key'});assert.equal(failedRotation.kind,'error');assert.equal(failedRotation.data.code,'http');assert.equal(await hash(),before);pass('failed key rotation retains the previous private key');
+   assert.equal((await ok('rotate_key')).phase,'stopped');const rotated=await hash();assert.notEqual(rotated,before);await assert.rejects(readFile(candidatePath),{code:'ENOENT'});pass('successful key rotation commits a new key only after server acceptance');
+  await writeFile(candidatePath,await readFile(privatePath));assert.equal((await rpc({command:'start_vpn'})).data.code,'key_rotation_incomplete');assert.equal((await ok('configure')).phase,'stopped');await assert.rejects(readFile(candidatePath),{code:'ENOENT'});pass('incomplete key rotation blocks start and configure repairs it');
  const activePath=join(work,'data/active.json');const active=await readFile(activePath,'utf8');
  mode='unsafe';assert.equal((await rpc({command:'configure'})).kind,'error');assert.equal(await readFile(activePath,'utf8'),active);pass('unsafe archive rejected and previous configuration preserved');
  mode='pause';const pending=rpc({command:'configure'});while(!releaseDownload)await delay(20);
@@ -101,10 +112,12 @@ try{
  assert.equal((await rpc({command:'start_vpn'})).data.code,'tinc_missing');pass('missing real Tinc binary is a visible failure');
  mode='expired';assert.equal((await rpc({command:'configure'})).data.code,'auth_expired');assert.equal((await ok('get_status')).session,null);pass('expired session cleared while retained configuration survives');
  const logs=(await rpc({command:'get_recent_logs'})).data;assert(!JSON.stringify(logs).includes('fixture-password'));assert(!JSON.stringify(logs).includes('fixture-token'));assert(!JSON.stringify(logs).includes('PRIVATE KEY'));pass('logs exclude credentials and private keys');
- await stopAgent();assert.equal((await startAgent()).data.phase,'stopped');assert.equal((await ok('get_status')).session,null);pass('agent restart recovers committed config without inventing a live session');
+ await stopAgent();assert.equal((await startAgent()).data.phase,'stopped');assert.equal((await ok('get_status')).session,null);assert.equal(await hash(),rotated);pass('agent restart recovers committed config and stable key without inventing a live session');
  await stopAgent();
  const settings=JSON.parse(await readFile(join(work,'settings.json'),'utf8'));settings.tinc_binary=join(root,'target/debug/examples',process.platform==='win32'?'process_fixture.exe':'process_fixture');await writeFile(join(work,'settings.json'),JSON.stringify(settings));
- await startAgent();assert.equal((await rpc({command:'start_vpn'})).data.code,'start_failed');assert.equal((await ok('get_status')).process_running,false);pass('early child-process exit is a start failure, never a running connection');
+ await startAgent();assert.equal((await login()).kind,'status');assert.equal((await rpc({command:'start_vpn'})).data.code,'start_failed');assert.equal((await ok('get_status')).process_running,false);pass('early child-process exit is a start failure, never a running connection');
+ mode='revoked';assert.equal((await rpc({command:'start_vpn'})).data.code,'node_revoked');const revoked=await ok('get_status');assert.equal(revoked.session,null);assert.equal(revoked.last_error.code,'node_revoked');pass('server revoke blocks reconnect and clears the live login session');
+ await stopAgent();assert.equal((await startAgent()).data.phase,'failed');assert.equal((await ok('get_status')).last_error.code,'node_revoked');assert.equal(await hash(),rotated);pass('revoked profile remains blocked after agent restart while its private key stays stable');
  if(desktopPage){await desktopPage.getByRole('button',{name:'刷新状态'}).click();await delay(500);await desktopPage.screenshot({path:join(work,'desktop-final.png'),fullPage:true});}
  console.log(`Completed ${passed.length} local integration checks. Backend was a fixture; no real VPN connection claimed.`);
  await writeFile(join(work,'result.json'),JSON.stringify({checks:passed,remoteBackend:'fixture',realVpn:false},null,2));

@@ -44,7 +44,25 @@ pub struct Identity {
     pub sid: String,
     pub net_name: String,
     pub node_ip: String,
+    #[serde(default)]
+    pub node_id: Option<u64>,
+    #[serde(default)]
+    pub network_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_code: Option<String>,
 }
+
+impl PartialEq for Identity {
+    fn eq(&self, other: &Self) -> bool {
+        self.sid == other.sid
+            && self.net_name == other.net_name
+            && self.node_ip == other.node_ip
+            && self.node_id == other.node_id
+            && self.network_id == other.network_id
+    }
+}
+impl Eq for Identity {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
     pub phase: Phase,
@@ -82,11 +100,15 @@ pub struct LogEntry {
 pub enum Request {
     Login {
         server: String,
-        sid: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        access_code: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sid: Option<String>,
         password: zeroize::Zeroizing<String>,
         allow_http: bool,
     },
     Configure,
+    RotateKey,
     StartVpn,
     StopVpn,
     GetStatus,

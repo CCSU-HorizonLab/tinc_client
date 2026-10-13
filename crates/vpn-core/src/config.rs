@@ -13,6 +13,8 @@ pub struct Active {
     pub generation: String,
     pub identity: Identity,
     pub profile: String,
+    #[serde(default)]
+    pub revoked: bool,
 }
 pub struct Validated {
     pub files: BTreeMap<String, String>,
@@ -352,6 +354,7 @@ pub fn apply(
             .into_owned(),
         identity: identity.clone(),
         profile: profile.into(),
+        revoked: false,
     };
     // Commit immutable generation first, then atomically replace the small pointer.
     // A failed pointer write leaves the previous configuration fully usable.
@@ -361,4 +364,11 @@ pub fn apply(
         &serde_json::to_vec(&active).map_err(|_| Error::protocol("配置索引编码失败"))?,
     )?;
     Ok(active)
+}
+
+pub fn write_active(root: &Path, active: &Active) -> Result<()> {
+    keys::atomic_write(
+        &root.join("active.json"),
+        &serde_json::to_vec(active).map_err(|_| Error::protocol("配置索引编码失败"))?,
+    )
 }

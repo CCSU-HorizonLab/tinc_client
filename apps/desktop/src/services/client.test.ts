@@ -1,13 +1,31 @@
 import {describe,it,expect} from 'vitest';
 
-import {connectionView,controls,failure,isHttpOrigin,type Status} from './client';
-const status:Status={phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
+import {connectionView,controls,failure,isHttpOrigin,isValidAccessCode,normalizeAccessCode,type Status} from './client';
+const status:Status={phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
 describe('failure recovery controls',()=>{
- it('allows retry and starting retained config after failed update',()=>expect(controls(status,false)).toEqual({configure:true,start:true,stop:false}));
- it('prevents duplicate operations while configuring',()=>expect(controls({...status,phase:'configuring'},false)).toEqual({configure:false,start:false,stop:false}));
- it('allows stopping a running process after session logout',()=>expect(controls({...status,session:null,process_running:true,phase:'running'},false)).toEqual({configure:false,start:false,stop:true}));
- it('does not invent state before service connection',()=>expect(controls(null,false)).toEqual({configure:false,start:false,stop:false}));
+ it('allows retry and starting retained config only for the logged-in profile',()=>expect(controls(status,false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
+ it('prevents duplicate operations while configuring',()=>expect(controls({...status,phase:'configuring'},false)).toEqual({configure:false,rotate:false,start:false,stop:false}));
+ it('allows stopping a running process after session logout',()=>expect(controls({...status,session:null,process_running:true,phase:'running'},false)).toEqual({configure:false,rotate:false,start:false,stop:true}));
+ it('does not invent state before service connection',()=>expect(controls(null,false)).toEqual({configure:false,rotate:false,start:false,stop:false}));
+ it('rejects starting a retained profile under a different node session',()=>expect(controls({...status,session:{sid:'other',net_name:'net',node_ip:'10.0.0.3'}},false).start).toBe(false));
+ it('requires reconfiguration when stable identity metadata appears after an upgrade',()=>expect(controls({...status,configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2'}},false).start).toBe(false));
+ it('rejects starting when the configured node address changed',()=>expect(controls({...status,configured:{...status.configured!,node_ip:'10.0.0.9'}},false).start).toBe(false));
+ it('retains profile continuity when access code rotates for same node',()=>expect(controls({...status,session:{...status.session!,access_code:'TL-8H2P-9R3X'}},false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
+ it('rejects starting a revoked profile',()=>expect(controls({...status,last_error:{code:'node_revoked',message:'revoked',retryable:false}},false).start).toBe(false));
  it('does not surface untrusted exception contents',()=>expect(failure('secret token')).toEqual({code:'desktop',message:'桌面接口调用失败，请检查本地服务并重试',retryable:true}));
+});
+describe('access code specification controls',()=>{
+ it('normalizes lowercase and surrounding whitespace to uppercase', ()=>{
+  expect(normalizeAccessCode('  tl-7k9m-2q4f  ')).toBe('TL-7K9M-2Q4F');
+ });
+ it('validates correct access code structure and alphabet', ()=>{
+  expect(isValidAccessCode('TL-7K9M-2Q4F')).toBe(true);
+  expect(isValidAccessCode('tl-7k9m-2q4f')).toBe(true);
+  expect(isValidAccessCode('TL-1111-2222')).toBe(false);
+  expect(isValidAccessCode('TL-OOOO-XXXX')).toBe(false);
+  expect(isValidAccessCode('TL-SHORT')).toBe(false);
+  expect(isValidAccessCode('NODE_NAME_ONLY')).toBe(false);
+ });
 });
 describe('server address controls',()=>{
  it('recognizes HTTP after whitespace and with uppercase scheme',()=>{
@@ -17,9 +35,9 @@ describe('server address controls',()=>{
 });
 describe('connection status',()=>{
  it('only reports a verified probe as connected',()=>{
- expect(connectionView({...status,connection:'connected'}).label).toBe('已验证连通');
- expect(connectionView({...status,connection:'unreachable'}).label).toBe('暂不可达');
- expect(connectionView({...status,connection:'unknown'}).label).toBe('尚未验证');
+  expect(connectionView({...status,connection:'connected'}).label).toBe('已验证连通');
+  expect(connectionView({...status,connection:'unreachable'}).label).toBe('暂不可达');
+  expect(connectionView({...status,connection:'unknown'}).label).toBe('尚未验证');
   expect(connectionView({...status,process_running:true,connection:'unknown'}).label).toBe('正在连接');
  });
 });

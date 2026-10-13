@@ -29,7 +29,7 @@ async fn distinguishes_rejection_and_malformed_success_without_leaking_server_bo
             post(move || async move { Json(value) }),
         ))
         .await;
-        let error = Session::login(&url, "client_a", "password with spaces", true)
+        let error = Session::login(&url, None, Some("client_a"), "password with spaces", true)
             .await
             .err()
             .unwrap();
@@ -40,18 +40,43 @@ async fn distinguishes_rejection_and_malformed_success_without_leaking_server_bo
 }
 #[tokio::test]
 async fn follows_observed_request_fields_and_surfaces_expired_download() {
-    let app=Router::new().route("/api/tinc/client/login",post(|Json(v):Json<serde_json::Value>|async move{
-        assert_eq!(v,json!({"sid":"client_a","password":" with spaces "}));Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2"}))
-    })).route("/api/tinc/client/config/download",post(|Json(v):Json<serde_json::Value>|async move{
-        assert_eq!(v,json!({"sid":"client_a","token":"opaque"}));axum::http::StatusCode::UNAUTHORIZED
-    })).route("/api/tinc/client/key/upload",post(|Json(v):Json<serde_json::Value>|async move{
-        assert_eq!(v,json!({"sid":"client_a","token":"opaque","content":UPLOAD,"action":"exchangeFile"}));
-        ([("content-type", "text/plain; charset=UTF-8"), ("cache-control", "no-store")], "host content")
-    }));
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|Json(v): Json<serde_json::Value>| async move {
+                assert_eq!(v, json!({"sid":"client_a","password":" with spaces "}));
+                Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2","node_id":101,"network_id":20}))
+            }),
+        )
+        .route(
+            "/api/tinc/client/config/download",
+            post(|Json(v): Json<serde_json::Value>| async move {
+                assert_eq!(v, json!({"sid":"client_a","token":"opaque"}));
+                axum::http::StatusCode::UNAUTHORIZED
+            }),
+        )
+        .route(
+            "/api/tinc/client/key/upload",
+            post(|Json(v): Json<serde_json::Value>| async move {
+                assert_eq!(
+                    v,
+                    json!({"sid":"client_a","token":"opaque","content":UPLOAD,"action":"exchangeFile"})
+                );
+                (
+                    [
+                        ("content-type", "text/plain; charset=UTF-8"),
+                        ("cache-control", "no-store"),
+                    ],
+                    "host content",
+                )
+            }),
+        );
     let (url, task) = serve(app).await;
-    let session = Session::login(&url, "client_a", " with spaces ", true)
+    let session = Session::login(&url, None, Some("client_a"), " with spaces ", true)
         .await
         .unwrap();
+    assert_eq!(session.identity.node_id, Some(101));
+    assert_eq!(session.identity.network_id, Some(20));
     assert_eq!(session.download().await.unwrap_err().code, "auth_expired");
     assert_eq!(session.upload(UPLOAD).await.unwrap(), "host content");
     task.abort();
@@ -61,11 +86,13 @@ async fn upload_marks_token_rejection_as_an_expired_session() {
     let app = Router::new()
         .route(
             "/api/tinc/client/login",
-            post(|| async { Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2"})) }),
+            post(|| async {
+                Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2"}))
+            }),
         )
         .route("/api/tinc/client/key/upload", post(|| async { StatusCode::UNAUTHORIZED }));
     let (url, task) = serve(app).await;
-    let session = Session::login(&url, "client_a", "password", true)
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
         .await
         .unwrap();
     assert_eq!(
@@ -88,7 +115,7 @@ async fn upload_rejects_a_non_plain_text_success_response() {
             post(|| async { ([("content-type", "application/json")], "host content") }),
         );
     let (url, task) = serve(app).await;
-    let session = Session::login(&url, "client_a", "password", true)
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
         .await
         .unwrap();
     assert_eq!(session.upload(UPLOAD).await.unwrap_err().code, "protocol");
@@ -108,7 +135,7 @@ async fn download_rejects_zip_bytes_with_an_unexpected_media_type() {
             post(|| async { ([("content-type", "application/octet-stream")], b"PK\x03\x04payload") }),
         );
     let (url, task) = serve(app).await;
-    let session = Session::login(&url, "client_a", "password", true)
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
         .await
         .unwrap();
     assert_eq!(session.download().await.unwrap_err().code, "protocol");
@@ -141,6 +168,12 @@ async fn upload_maps_only_known_backend_error_codes_and_never_exposes_msg() {
             "session_unavailable",
             true,
         ),
+        (
+            StatusCode::GONE,
+            "CLIENT_NODE_REVOKED",
+            "node_revoked",
+            false,
+        ),
     ] {
         let response = format!(r#"{{"code":"{backend_code}","msg":"token=secret"}}"#);
         let app = Router::new()
@@ -158,7 +191,7 @@ async fn upload_maps_only_known_backend_error_codes_and_never_exposes_msg() {
                 }),
             );
         let (url, task) = serve(app).await;
-        let session = Session::login(&url, "client_a", "password", true)
+        let session = Session::login(&url, None, Some("client_a"), "password", true)
             .await
             .unwrap();
         let error = session.upload(UPLOAD).await.unwrap_err();
@@ -185,7 +218,7 @@ async fn repeated_uploads_keep_the_same_authenticated_public_content() {
             }
         }));
     let (url, task) = serve(app).await;
-    let session = Session::login(&url, "client_a", "password", true)
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
         .await
         .unwrap();
     assert_eq!(session.upload(UPLOAD).await.unwrap(), "host content");
@@ -211,11 +244,200 @@ async fn never_follows_redirect_with_credentials() {
         }),
     ))
     .await;
-    let err = Session::login(&url, "client_a", "secret", true)
+    let err = Session::login(&url, None, Some("client_a"), "secret", true)
         .await
         .err()
         .unwrap();
     assert_eq!(err.code, "http");
     assert!(err.message.contains("307"));
     task.abort();
+}
+
+#[test]
+fn validates_access_code_format_and_normalization() {
+    use vpn_core::api::validate_access_code;
+
+    // Valid formats normalize to uppercase
+    assert_eq!(
+        validate_access_code("TL-7K9M-2Q4F").unwrap(),
+        "TL-7K9M-2Q4F"
+    );
+    assert_eq!(
+        validate_access_code("tl-7k9m-2q4f").unwrap(),
+        "TL-7K9M-2Q4F"
+    );
+    assert_eq!(
+        validate_access_code("  tl-7k9m-2q4f  ").unwrap(),
+        "TL-7K9M-2Q4F"
+    );
+
+    // Invalid length
+    assert!(validate_access_code("TL-7K9M").is_err());
+    assert!(validate_access_code("TL-7K9M-2Q4F1").is_err());
+
+    // Invalid prefix or separator
+    assert!(validate_access_code("XX-7K9M-2Q4F").is_err());
+    assert!(validate_access_code("TL7K9M-2Q4F_").is_err());
+    assert!(validate_access_code("TL-7K9M_2Q4F").is_err());
+
+    // Invalid characters outside Crockford Base32 (no 0, 1, I, L, O)
+    assert!(validate_access_code("TL-7K90-2Q4F").is_err());
+    assert!(validate_access_code("TL-7K91-2Q4F").is_err());
+    assert!(validate_access_code("TL-7K9I-2Q4F").is_err());
+    assert!(validate_access_code("TL-7K9L-2Q4F").is_err());
+    assert!(validate_access_code("TL-7K9O-2Q4F").is_err());
+}
+
+#[tokio::test]
+async fn access_code_login_sends_contract_json_without_sid_and_parses_response() {
+    let captured_request = Arc::new(Mutex::new(None));
+    let captured_clone = captured_request.clone();
+
+    let app = Router::new().route(
+        "/api/tinc/client/login",
+        post(move |Json(v): Json<serde_json::Value>| {
+            let captured = captured_clone.clone();
+            async move {
+                *captured.lock().unwrap() = Some(v);
+                Json(json!({
+                    "status": 1,
+                    "msg": "登录成功",
+                    "access_code": "TL-7K9M-2Q4F",
+                    "sid": "client_a",
+                    "token": "tok_xyz_123",
+                    "node_id": 101,
+                    "network_id": 20,
+                    "net_name": "net_office",
+                    "node_ip": "10.42.0.2"
+                }))
+            }
+        }),
+    );
+    let (url, task) = serve(app).await;
+
+    // Login with lowercase, untrimmed access code; verify it normalizes and sends no sid
+    let session = Session::login(&url, Some("  tl-7k9m-2q4f  "), None, "node-secret", true)
+        .await
+        .unwrap();
+
+    let sent = captured_request.lock().unwrap().take().unwrap();
+    assert_eq!(
+        sent,
+        json!({
+            "accessCode": "TL-7K9M-2Q4F",
+            "password": "node-secret"
+        })
+    );
+    // Crucial: verify "sid" is NOT present in request payload
+    assert!(sent.get("sid").is_none());
+
+    // Verify session identity fields
+    assert_eq!(session.identity.sid, "client_a");
+    assert_eq!(session.identity.net_name, "net_office");
+    assert_eq!(session.identity.node_ip, "10.42.0.2");
+    assert_eq!(session.identity.node_id, Some(101));
+    assert_eq!(session.identity.network_id, Some(20));
+    assert_eq!(
+        session.identity.access_code.as_deref(),
+        Some("TL-7K9M-2Q4F")
+    );
+
+    task.abort();
+}
+
+#[tokio::test]
+async fn access_code_login_maps_backend_rejections() {
+    for (backend_code, expected_client_code, retryable) in [
+        ("CLIENT_CREDENTIAL_INVALID", "credential_invalid", false),
+        ("CLIENT_LEGACY_LOGIN_AMBIGUOUS", "login_ambiguous", false),
+        ("CLIENT_NETWORK_IP_INVALID", "assignment_missing", false),
+        ("CLIENT_NETWORK_NOT_FOUND", "assignment_missing", false),
+        ("SYSTEM_ERROR", "server_error", true),
+    ] {
+        let app = Router::new().route(
+            "/api/tinc/client/login",
+            post(move || async move {
+                Json(json!({
+                    "status": 0,
+                    "code": backend_code,
+                    "msg": format!("backend rejection for {backend_code}")
+                }))
+            }),
+        );
+        let (url, task) = serve(app).await;
+        let err = Session::login(&url, Some("TL-7K9M-2Q4F"), None, "wrong-pwd", true)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(err.code, expected_client_code);
+        assert_eq!(err.retryable, retryable);
+        task.abort();
+    }
+}
+
+#[test]
+fn access_code_rotation_preserves_profile_id_and_identity_equality() {
+    use vpn_core::{keys, Identity};
+
+    let origin = "http://127.0.0.1:8080";
+    let identity_v1 = Identity {
+        sid: "client_a".into(),
+        net_name: "office_vpn".into(),
+        node_ip: "10.42.0.2".into(),
+        node_id: Some(101),
+        network_id: Some(20),
+        access_code: Some("TL-7K9M-2Q4F".into()),
+    };
+
+    let identity_v2 = Identity {
+        sid: "client_a".into(),
+        net_name: "office_vpn".into(),
+        node_ip: "10.42.0.2".into(),
+        node_id: Some(101),
+        network_id: Some(20),
+        access_code: Some("TL-9A8B-7C6D".into()), // Rotated access code
+    };
+
+    // Equality: identity equality ignores access_code changes
+    assert_eq!(identity_v1, identity_v2);
+
+    // Profile ID: profile_id remains completely invariant across access code rotation
+    let profile_1 = keys::profile_id(origin, &identity_v1);
+    let profile_2 = keys::profile_id(origin, &identity_v2);
+    assert_eq!(profile_1, profile_2);
+}
+
+#[test]
+fn same_node_name_across_different_networks_isolate_profiles() {
+    use vpn_core::{keys, Identity};
+
+    let origin = "http://127.0.0.1:8080";
+
+    // Two nodes with the same display name ("a") in different networks
+    let node_net_a = Identity {
+        sid: "a".into(),
+        net_name: "network_a".into(),
+        node_ip: "10.42.0.2".into(),
+        node_id: Some(10),
+        network_id: Some(1),
+        access_code: Some("TL-AAAA-1111".into()),
+    };
+
+    let node_net_b = Identity {
+        sid: "a".into(),
+        net_name: "network_b".into(),
+        node_ip: "10.42.0.2".into(),
+        node_id: Some(20),
+        network_id: Some(2),
+        access_code: Some("TL-BBBB-2222".into()),
+    };
+
+    assert_ne!(node_net_a, node_net_b);
+
+    let profile_a = keys::profile_id(origin, &node_net_a);
+    let profile_b = keys::profile_id(origin, &node_net_b);
+
+    // Profiles are distinct; different networks/nodes never overwrite keys or configurations
+    assert_ne!(profile_a, profile_b);
 }

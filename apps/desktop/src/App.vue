@@ -15,9 +15,13 @@ import {
 
 // ── 响应式状态 ──────────────────────────────────────────────
 const server = ref('https://');
-const sid = ref('');
+const accessCode = ref('');
 const password = ref('');
 const allowHttp = ref(false);
+
+function onAccessCodeBlur() {
+  accessCode.value = accessCode.value.trim().toUpperCase();
+}
 
 const status = ref<Status | null>(null);
 const logs = ref<LogEntry[]>([]);
@@ -123,11 +127,13 @@ async function act(command: Command) {
   busy.value = true;
   error.value = null;
   try {
+    const normalizedCode = accessCode.value.trim().toUpperCase();
+    accessCode.value = normalizedCode;
     const args =
       command === 'login'
         ? {
             server: server.value.trim(),
-            sid: sid.value.trim(),
+            accessCode: normalizedCode,
             password: password.value,
             allowHttp: allowHttp.value,
           }
@@ -216,13 +222,13 @@ onUnmounted(() => clearInterval(timer));
             <span class="step">01</span>
             <div>
               <h2>登录节点</h2>
-              <p>使用管理员分配的节点名和密码</p>
+              <p>接入码由管理员创建节点后提供</p>
             </div>
           </div>
 
           <form @submit.prevent="act('login')">
             <label>
-              服务端地址
+              TincLink 服务地址
               <input
                 v-model="server"
                 placeholder="https://vpn.example.com"
@@ -231,13 +237,14 @@ onUnmounted(() => clearInterval(timer));
               />
             </label>
             <label>
-              节点名
+              接入码
               <input
-                v-model="sid"
-                placeholder="例如 office_laptop"
+                v-model="accessCode"
+                placeholder="TL-7K9M-2Q4F"
                 autocomplete="username"
-                maxlength="64"
+                maxlength="16"
                 :disabled="busy"
+                @blur="onAccessCodeBlur"
               />
             </label>
             <label>
@@ -252,14 +259,14 @@ onUnmounted(() => clearInterval(timer));
             </label>
             <label class="checkbox">
               <input v-model="allowHttp" type="checkbox" :disabled="busy || !httpServer" />
-              允许 HTTP 明文登录（仅 HTTP 地址需要勾选）
+              允许 HTTP 明文登录（仅开发环境）
             </label>
             <p v-if="httpServer && !allowHttp" class="http-warning">
               当前地址使用 HTTP，必须勾选上方选项后才能登录。
             </p>
             <button
               class="primary full"
-              :disabled="busy || !available || !sid || !password || (httpServer && !allowHttp)"
+              :disabled="busy || !available || !accessCode.trim() || !password || (httpServer && !allowHttp)"
             >
               {{ busy ? '操作处理中…' : status?.session ? '重新登录' : '登录节点' }}
               <span>→</span>
@@ -267,7 +274,8 @@ onUnmounted(() => clearInterval(timer));
           </form>
 
           <div v-if="status?.session" class="session">
-            已登录：{{ status.session.sid }}
+            已登录节点：{{ status.session.sid }}
+            <span v-if="status.session.access_code" class="session-code">（{{ status.session.access_code }}）</span>
             <button class="text-button" :disabled="busy || !available" @click="act('logout')">
               退出登录
             </button>
@@ -286,12 +294,20 @@ onUnmounted(() => clearInterval(timer));
 
           <dl>
             <div>
-              <dt>网络名称</dt>
+              <dt>节点名称</dt>
+              <dd>{{ identity?.sid ?? '等待登录' }}</dd>
+            </div>
+            <div>
+              <dt>所属网络</dt>
               <dd>{{ identity?.net_name ?? '等待登录' }}</dd>
             </div>
             <div>
               <dt>节点地址</dt>
               <dd>{{ identity?.node_ip ?? '由后台分配' }}</dd>
+            </div>
+            <div v-if="identity?.access_code">
+              <dt>接入码</dt>
+              <dd>{{ identity.access_code }}</dd>
             </div>
             <div>
               <dt>服务端状态</dt>
@@ -307,6 +323,10 @@ onUnmounted(() => clearInterval(timer));
 
           <button class="secondary full" :disabled="!buttons.configure" @click="act('configure')">
             {{ status?.configured ? '更新配置（高级）' : '下载并应用配置' }}
+          </button>
+
+          <button class="text-button full" :disabled="!buttons.rotate" @click="act('rotate_key')">
+            安全轮换当前节点密钥
           </button>
 
           <div class="actions">

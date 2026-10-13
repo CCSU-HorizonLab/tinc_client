@@ -5,6 +5,9 @@ fn identity() -> Identity {
         sid: "client_a".into(),
         net_name: "office".into(),
         node_ip: "10.42.0.2".into(),
+        node_id: None,
+        network_id: None,
+        access_code: None,
     }
 }
 fn pem() -> &'static str {
@@ -127,6 +130,9 @@ fn accepts_and_applies_backend_config_contract_fixture() {
         sid: "client_fixture".into(),
         net_name: "office".into(),
         node_ip: "10.254.0.2".into(),
+        node_id: None,
+        network_id: None,
+        access_code: None,
     };
     let bytes = match std::env::var_os("TINC_BACKEND_FIXTURE") {
         Some(path) => std::fs::read(path).expect("read backend ZIP fixture"),
@@ -292,4 +298,112 @@ fn storage_failure_before_commit_keeps_old_generation() {
         std::fs::read(root.path().join("active.json")).unwrap(),
         b"previous pointer"
     );
+}
+
+#[test]
+fn stable_ids_isolate_same_names_and_migrate_the_legacy_key() {
+    let root = tempfile::tempdir().unwrap();
+    let legacy_identity = identity();
+    let legacy = keys::profile_id("https://management/", &legacy_identity);
+    let before = keys::ensure_key(root.path(), &legacy, &legacy_identity).unwrap();
+
+    let mut first = legacy_identity.clone();
+    first.network_id = Some(20);
+    first.node_id = Some(101);
+    let canonical = keys::profile_id("https://management/", &first);
+    assert_ne!(legacy, canonical);
+    keys::migrate_legacy_key(root.path(), &legacy, &canonical).unwrap();
+    assert_eq!(
+        before,
+        keys::ensure_key(root.path(), &canonical, &first).unwrap()
+    );
+    assert!(!root.path().join("keys").join(legacy).exists());
+
+    let mut second = first.clone();
+    second.network_id = Some(21);
+    second.node_id = Some(102);
+    assert_ne!(canonical, keys::profile_id("https://management/", &second));
+    let mut other_server = first.clone();
+    other_server.node_id = Some(201);
+    assert_ne!(
+        canonical,
+        keys::profile_id("https://other-management/", &other_server)
+    );
+}
+
+#[test]
+fn profile_generations_are_isolated_and_switch_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let mut first = identity();
+    first.network_id = Some(20);
+    first.node_id = Some(101);
+    let first_profile = keys::profile_id("https://management/", &first);
+    let first_public = keys::ensure_key(root.path(), &first_profile, &first).unwrap();
+    let first_active = config::apply(
+        root.path(),
+        config::validate_zip(&zip(&[("tinc.conf", CONF)]), &first, "tinc0").unwrap(),
+        &first,
+        &first_profile,
+        &first_public,
+        &master(),
+    )
+    .unwrap();
+    let first_conf =
+        std::fs::read(config::generation_path(root.path(), &first_active).join("tinc.conf"))
+            .unwrap();
+
+    let mut second = first.clone();
+    second.sid = "client_b".into();
+    second.node_ip = "10.42.0.3".into();
+    second.network_id = Some(30);
+    second.node_id = Some(103);
+    let second_profile = keys::profile_id("https://management/", &second);
+    let second_public = keys::ensure_key(root.path(), &second_profile, &second).unwrap();
+    let second_conf =
+        "Name = client_b\nMode = router\nAddressFamily = ipv4\nConnectTo = server_master\n";
+    let second_active = config::apply(
+        root.path(),
+        config::validate_zip(&zip(&[("tinc.conf", second_conf)]), &second, "tinc0").unwrap(),
+        &second,
+        &second_profile,
+        &second_public,
+        &master(),
+    )
+    .unwrap();
+
+    assert_ne!(first_profile, second_profile);
+    assert_eq!(
+        config::read_active(root.path()).unwrap().unwrap().profile,
+        second_profile
+    );
+    assert_eq!(
+        std::fs::read(config::generation_path(root.path(), &first_active).join("tinc.conf"))
+            .unwrap(),
+        first_conf
+    );
+    assert!(config::generation_path(root.path(), &second_active)
+        .join("hosts/client_b")
+        .is_file());
+    assert!(!config::generation_path(root.path(), &second_active)
+        .join("hosts/client_a")
+        .exists());
+}
+
+#[test]
+fn candidate_key_remains_a_recovery_marker_until_commit_finishes() {
+    let root = tempfile::tempdir().unwrap();
+    let profile = "profile";
+    keys::replace_private_key(root.path(), profile, b"old-private").unwrap();
+    keys::store_candidate(root.path(), profile, b"candidate-private").unwrap();
+
+    let old = keys::activate_candidate(root.path(), profile).unwrap();
+
+    assert_eq!(&*old, b"old-private");
+    assert!(keys::candidate_exists(root.path(), profile));
+    assert_eq!(
+        std::fs::read(root.path().join("keys/profile/rsa_key.priv")).unwrap(),
+        b"candidate-private"
+    );
+    keys::discard_candidate(root.path(), profile).unwrap();
+    assert!(!keys::candidate_exists(root.path(), profile));
 }

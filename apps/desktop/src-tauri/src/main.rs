@@ -8,9 +8,16 @@ async fn status_request(request: Request) -> Result<Status> {
     }
 }
 #[tauri::command]
-async fn login(server: String, sid: String, password: String, allow_http: bool) -> Result<Status> {
+async fn login(
+    server: String,
+    access_code: Option<String>,
+    sid: Option<String>,
+    password: String,
+    allow_http: bool,
+) -> Result<Status> {
     status_request(Request::Login {
         server,
+        access_code,
         sid,
         password: zeroize::Zeroizing::new(password),
         allow_http,
@@ -20,6 +27,10 @@ async fn login(server: String, sid: String, password: String, allow_http: bool) 
 #[tauri::command]
 async fn configure() -> Result<Status> {
     status_request(Request::Configure).await
+}
+#[tauri::command]
+async fn rotate_key() -> Result<Status> {
+    status_request(Request::RotateKey).await
 }
 #[tauri::command]
 async fn start_vpn() -> Result<Status> {
@@ -50,6 +61,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             login,
             configure,
+            rotate_key,
             start_vpn,
             stop_vpn,
             get_status,
