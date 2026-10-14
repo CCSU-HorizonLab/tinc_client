@@ -167,6 +167,27 @@ fn managed_routes(
     Ok(routes)
 }
 
+#[derive(Debug, PartialEq)]
+struct RoutePlan {
+    add: Vec<RouteState>,
+    remove: Vec<RouteState>,
+}
+
+fn route_plan(current: &[RouteState], desired: &[RouteState]) -> RoutePlan {
+    RoutePlan {
+        add: desired
+            .iter()
+            .filter(|route| !current.contains(route))
+            .cloned()
+            .collect(),
+        remove: current
+            .iter()
+            .filter(|route| !desired.contains(route))
+            .cloned()
+            .collect(),
+    }
+}
+
 fn adapter_state_error(reason: &str) -> Error {
     Error::new(
         "adapter_state_invalid",
@@ -624,13 +645,24 @@ impl Engine {
                 .last_keepalive
                 .is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
         {
-            if let Some(session) = self.session.as_ref() {
+            let keepalive = if let Some(session) = self.session.as_ref() {
                 self.last_keepalive = Some(tokio::time::Instant::now());
-                let keepalive = session.keepalive().await;
-                if let Err(error) = keepalive {
+                Some(session.keepalive().await)
+            } else {
+                None
+            };
+            if let Some(keepalive) = keepalive {
+                if let Err(error) = &keepalive {
                     if error.code == "node_revoked" || error.code == "auth_expired" {
-                        return Err(error);
+                        return Err(error.clone());
                     }
+                }
+                if let Ok(Some(allowed_routes)) = keepalive {
+                    let gateway = self.probe_target.ok_or_else(|| {
+                        Error::new("route_sync", "VPN 运行状态缺少网关路由目标", true)
+                    })?;
+                    let desired = managed_routes(gateway, &allowed_routes)?;
+                    self.reconcile_routes(&desired).await?;
                 }
             }
         }
@@ -785,15 +817,7 @@ impl Engine {
             self.adapter_address_configured = true;
             self.write_adapter_state(ip)?;
             for route in routes {
-                let target = route
-                    .destination
-                    .parse::<std::net::Ipv4Addr>()
-                    .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
-                let mut c = Command::new(PathBuf::from(system.clone()).join("System32/netsh.exe"));
-                c.args(windows_add_route_args(&self.settings.interface, target));
-                run_adapter(c).await?;
-                self.adapter_routes.push(route.clone());
-                self.write_adapter_state(ip)?;
+                self.install_managed_route(ip, route).await?;
             }
         }
         #[cfg(unix)]
@@ -815,16 +839,99 @@ impl Engine {
             self.write_adapter_state(ip)?;
             run_adapter(c).await?;
             for route in routes {
-                let target = route
-                    .destination
-                    .parse::<std::net::Ipv4Addr>()
-                    .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
-                let mut c = Command::new("/usr/sbin/ip");
-                c.args(linux_add_route_args(&self.settings.interface, target));
-                run_adapter(c).await?;
-                self.adapter_routes.push(route.clone());
-                self.write_adapter_state(ip)?;
+                self.install_managed_route(ip, route).await?;
             }
+        }
+        Ok(())
+    }
+
+    async fn install_managed_route(&mut self, ip: &str, route: &RouteState) -> Result<()> {
+        if self.adapter_routes.contains(route) {
+            return Ok(());
+        }
+        let target = route
+            .destination
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
+        if route.prefix != 32 {
+            return Err(Error::protocol("服务端路由快照仅支持 IPv4 /32"));
+        }
+        #[cfg(windows)]
+        {
+            let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
+            c.args(windows_add_route_args(&self.settings.interface, target));
+            run_adapter(c).await?;
+        }
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("/usr/sbin/ip");
+            c.args(linux_add_route_args(&self.settings.interface, target));
+            run_adapter(c).await?;
+        }
+        self.adapter_routes.push(route.clone());
+        self.write_adapter_state(ip)
+    }
+
+    async fn remove_managed_route(&mut self, ip: &str, route: &RouteState) -> Result<()> {
+        if !self.adapter_routes.contains(route) {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
+            c.args(windows_delete_route_args(
+                &self.settings.interface,
+                &route.destination,
+                route.prefix,
+            ));
+            run_adapter(c).await?;
+        }
+        #[cfg(unix)]
+        {
+            let mut c = Command::new("/usr/sbin/ip");
+            c.args(linux_delete_route_args(
+                &self.settings.interface,
+                &route.destination,
+                route.prefix,
+            ));
+            run_adapter(c).await?;
+        }
+        forget_route(&mut self.adapter_routes, route);
+        self.write_adapter_state(ip)
+    }
+
+    async fn reconcile_routes(&mut self, desired: &[RouteState]) -> Result<()> {
+        let ip = self
+            .active
+            .as_ref()
+            .ok_or_else(|| Error::new("route_sync", "有效配置不存在，无法同步路由", false))?
+            .identity
+            .node_ip
+            .clone();
+        let plan = route_plan(&self.adapter_routes, desired);
+        let changed = !plan.add.is_empty() || !plan.remove.is_empty();
+        for route in &plan.add {
+            self.install_managed_route(&ip, route).await.map_err(|_| {
+                Error::new("route_sync", "新增授权节点路由失败，将在下次心跳重试", true)
+            })?;
+        }
+        for route in &plan.remove {
+            self.remove_managed_route(&ip, route).await.map_err(|_| {
+                Error::new("route_sync", "撤销过期节点路由失败，将在下次心跳重试", true)
+            })?;
+        }
+        if changed {
+            self.log("已根据服务端授权快照同步节点路由").await;
+        }
+        let mut status = self.status.write().await;
+        if status
+            .last_error
+            .as_ref()
+            .is_some_and(|error| error.code == "route_sync")
+        {
+            status.last_error = None;
         }
         Ok(())
     }
@@ -901,42 +1008,8 @@ impl Engine {
     async fn clear_adapter(&mut self, ip: &str) -> Result<()> {
         let mut first_error = None;
         for route in self.adapter_routes.clone() {
-            #[cfg(windows)]
-            {
-                let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-                let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
-                c.args(windows_delete_route_args(
-                    &self.settings.interface,
-                    &route.destination,
-                    route.prefix,
-                ));
-                match run_adapter(c).await {
-                    Ok(()) => {
-                        forget_route(&mut self.adapter_routes, &route);
-                        if let Err(error) = self.write_adapter_state(ip) {
-                            first_error.get_or_insert(error);
-                        }
-                    }
-                    Err(error) => first_error = Some(error),
-                }
-            }
-            #[cfg(unix)]
-            {
-                let mut c = Command::new("/usr/sbin/ip");
-                c.args(linux_delete_route_args(
-                    &self.settings.interface,
-                    &route.destination,
-                    route.prefix,
-                ));
-                match run_adapter(c).await {
-                    Ok(()) => {
-                        forget_route(&mut self.adapter_routes, &route);
-                        if let Err(error) = self.write_adapter_state(ip) {
-                            first_error.get_or_insert(error);
-                        }
-                    }
-                    Err(error) => first_error = Some(error),
-                }
+            if let Err(error) = self.remove_managed_route(ip, &route).await {
+                first_error.get_or_insert(error);
             }
         }
         if self.adapter_address_configured {
@@ -1452,5 +1525,29 @@ mod adapter_state_tests {
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0].destination, "10.42.0.1");
         assert_eq!(routes[1].destination, "10.42.0.3");
+    }
+
+    #[test]
+    fn route_plan_adds_new_routes_and_removes_only_stale_owned_routes() {
+        let gateway = RouteState {
+            destination: "10.42.0.1".into(),
+            prefix: 32,
+        };
+        let stale = RouteState {
+            destination: "10.42.0.3".into(),
+            prefix: 32,
+        };
+        let added = RouteState {
+            destination: "10.42.0.4".into(),
+            prefix: 32,
+        };
+
+        let plan = route_plan(
+            &[gateway.clone(), stale.clone()],
+            &[gateway.clone(), added.clone()],
+        );
+
+        assert_eq!(plan.add, vec![added]);
+        assert_eq!(plan.remove, vec![stale]);
     }
 }
