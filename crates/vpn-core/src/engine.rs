@@ -142,6 +142,31 @@ fn forget_route(routes: &mut Vec<RouteState>, deleted: &RouteState) {
     }
 }
 
+fn managed_routes(
+    gateway: std::net::Ipv4Addr,
+    allowed: &[AllowedRoute],
+) -> Result<Vec<RouteState>> {
+    let mut routes = vec![RouteState {
+        destination: gateway.to_string(),
+        prefix: 32,
+    }];
+    for route in allowed {
+        if route.prefix != 32 {
+            return Err(Error::protocol("服务端路由快照仅支持 IPv4 /32"));
+        }
+        if route.destination != gateway {
+            routes.push(RouteState {
+                destination: route.destination.to_string(),
+                prefix: route.prefix,
+            });
+        }
+    }
+    if routes.len() > MAX_MANAGED_ROUTES {
+        return Err(Error::protocol("服务端路由快照超过客户端安全上限"));
+    }
+    Ok(routes)
+}
+
 fn adapter_state_error(reason: &str) -> Error {
     Error::new(
         "adapter_state_invalid",
@@ -653,7 +678,7 @@ impl Engine {
                 false,
             ));
         }
-        session.keepalive().await?;
+        let refreshed_routes = session.keepalive().await?;
         if !self.settings.tinc_binary.is_file() {
             return Err(Error::new(
                 "tinc_missing",
@@ -662,6 +687,12 @@ impl Engine {
             ));
         }
         let probe_target = config::server_probe_target(&self.settings.data_dir, &active)?;
+        let routes = managed_routes(
+            probe_target,
+            refreshed_routes
+                .as_deref()
+                .unwrap_or_else(|| session.allowed_routes()),
+        )?;
         let mut version = Command::new(&self.settings.tinc_binary);
         version.arg("--version").kill_on_drop(true);
         hide(&mut version);
@@ -716,10 +747,7 @@ impl Engine {
                 true,
             ));
         }
-        if let Err(error) = self
-            .set_adapter(&active.identity.node_ip, probe_target)
-            .await
-        {
+        if let Err(error) = self.set_adapter(&active.identity.node_ip, &routes).await {
             self.stop().await?;
             return Err(error);
         }
@@ -741,7 +769,7 @@ impl Engine {
         self.probe_connection().await;
         Ok(())
     }
-    async fn set_adapter(&mut self, ip: &str, route_target: std::net::Ipv4Addr) -> Result<()> {
+    async fn set_adapter(&mut self, ip: &str, routes: &[RouteState]) -> Result<()> {
         ip.parse::<std::net::Ipv4Addr>()
             .map_err(|_| Error::protocol("无效节点地址"))?;
         #[cfg(windows)]
@@ -756,17 +784,17 @@ impl Engine {
             run_adapter(c).await?;
             self.adapter_address_configured = true;
             self.write_adapter_state(ip)?;
-            let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
-            c.args(windows_add_route_args(
-                &self.settings.interface,
-                route_target,
-            ));
-            run_adapter(c).await?;
-            self.adapter_routes = vec![RouteState {
-                destination: route_target.to_string(),
-                prefix: 32,
-            }];
-            self.write_adapter_state(ip)?;
+            for route in routes {
+                let target = route
+                    .destination
+                    .parse::<std::net::Ipv4Addr>()
+                    .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
+                let mut c = Command::new(PathBuf::from(system.clone()).join("System32/netsh.exe"));
+                c.args(windows_add_route_args(&self.settings.interface, target));
+                run_adapter(c).await?;
+                self.adapter_routes.push(route.clone());
+                self.write_adapter_state(ip)?;
+            }
         }
         #[cfg(unix)]
         {
@@ -786,14 +814,17 @@ impl Engine {
             // already-down dedicated interface during recovery is harmless.
             self.write_adapter_state(ip)?;
             run_adapter(c).await?;
-            let mut c = Command::new("/usr/sbin/ip");
-            c.args(linux_add_route_args(&self.settings.interface, route_target));
-            run_adapter(c).await?;
-            self.adapter_routes = vec![RouteState {
-                destination: route_target.to_string(),
-                prefix: 32,
-            }];
-            self.write_adapter_state(ip)?;
+            for route in routes {
+                let target = route
+                    .destination
+                    .parse::<std::net::Ipv4Addr>()
+                    .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
+                let mut c = Command::new("/usr/sbin/ip");
+                c.args(linux_add_route_args(&self.settings.interface, target));
+                run_adapter(c).await?;
+                self.adapter_routes.push(route.clone());
+                self.write_adapter_state(ip)?;
+            }
         }
         Ok(())
     }
@@ -1400,5 +1431,26 @@ mod adapter_state_tests {
         forget_route(&mut routes, &gateway);
 
         assert_eq!(routes, vec![peer]);
+    }
+
+    #[test]
+    fn managed_routes_keep_gateway_first_and_deduplicate_it() {
+        let gateway = "10.42.0.1".parse().unwrap();
+        let allowed = vec![
+            AllowedRoute {
+                destination: gateway,
+                prefix: 32,
+            },
+            AllowedRoute {
+                destination: "10.42.0.3".parse().unwrap(),
+                prefix: 32,
+            },
+        ];
+
+        let routes = managed_routes(gateway, &allowed).unwrap();
+
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].destination, "10.42.0.1");
+        assert_eq!(routes[1].destination, "10.42.0.3");
     }
 }
