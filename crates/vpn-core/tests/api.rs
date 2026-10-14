@@ -201,6 +201,40 @@ async fn upload_maps_only_known_backend_error_codes_and_never_exposes_msg() {
         task.abort();
     }
 }
+
+#[tokio::test]
+async fn keepalive_maps_backend_failure_as_retryable() {
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|| async {
+                Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2"}))
+            }),
+        )
+        .route(
+            "/api/tinc/client/keepalive",
+            post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "code": "CLIENT_KEEPALIVE_FAILED",
+                        "msg": "token=secret"
+                    })),
+                )
+            }),
+        );
+    let (url, task) = serve(app).await;
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
+        .await
+        .unwrap();
+
+    let error = session.keepalive().await.unwrap_err();
+
+    assert_eq!(error.code, "keepalive_failed");
+    assert!(error.retryable);
+    assert!(!error.message.contains("secret"));
+    task.abort();
+}
 #[tokio::test]
 async fn repeated_uploads_keep_the_same_authenticated_public_content() {
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -349,6 +383,12 @@ async fn access_code_login_sends_contract_json_without_sid_and_parses_response()
 async fn access_code_login_maps_backend_rejections() {
     for (backend_code, expected_client_code, retryable) in [
         ("CLIENT_CREDENTIAL_INVALID", "credential_invalid", false),
+        ("CLIENT_LOGIN_RATE_LIMITED", "login_rate_limited", true),
+        (
+            "CLIENT_LOGIN_LIMITER_UNAVAILABLE",
+            "login_unavailable",
+            true,
+        ),
         ("CLIENT_LEGACY_LOGIN_AMBIGUOUS", "login_ambiguous", false),
         ("CLIENT_NETWORK_IP_INVALID", "assignment_missing", false),
         ("CLIENT_NETWORK_NOT_FOUND", "assignment_missing", false),

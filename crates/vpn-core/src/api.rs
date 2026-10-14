@@ -93,6 +93,14 @@ pub fn map_backend_error(code: &str, fallback_msg: Option<&str>) -> Error {
             fallback_msg.unwrap_or("接入码或密码错误，请核对后重试"),
             false,
         ),
+        "CLIENT_LOGIN_RATE_LIMITED" => {
+            Error::new("login_rate_limited", "登录尝试过于频繁，请稍后重试", true)
+        }
+        "CLIENT_LOGIN_LIMITER_UNAVAILABLE" => Error::new(
+            "login_unavailable",
+            "登录保护服务暂时不可用，请稍后重试",
+            true,
+        ),
         "CLIENT_LEGACY_LOGIN_AMBIGUOUS" => Error::new(
             "login_ambiguous",
             fallback_msg.unwrap_or("检测到多个同名节点，请使用接入码登录"),
@@ -126,6 +134,9 @@ pub fn map_backend_error(code: &str, fallback_msg: Option<&str>) -> Error {
             "后台会话服务暂时不可用，可以稍后重试",
             true,
         ),
+        "CLIENT_KEEPALIVE_FAILED" => {
+            Error::new("keepalive_failed", "心跳服务暂时不可用，可以稍后重试", true)
+        }
         "GATEWAY_HOST_UNAVAILABLE" | "GATEWAY_UNAVAILABLE" => Error::new(
             "gateway_unavailable",
             "网关配置暂时不可用，请联系管理员检查网关",
