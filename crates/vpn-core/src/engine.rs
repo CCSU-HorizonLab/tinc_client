@@ -4,6 +4,7 @@ use crate::{
     keys, *,
 };
 use std::{
+    collections::BTreeSet,
     fs,
     path::Path,
     path::PathBuf,
@@ -35,6 +36,7 @@ const ADAPTER_STATE_FILE: &str = "adapter-state.json";
 const CONNECTIVITY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+const MAX_MANAGED_ROUTES: usize = 1025;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,19 +88,57 @@ impl AdapterState {
             && self.prefix == settings.interface_prefix
             && self.generation == active.generation
             && self.profile == active.profile;
-        if !matches || self.address.parse::<std::net::Ipv4Addr>().is_err() {
+        let address = self.address.parse::<std::net::Ipv4Addr>();
+        if !matches || address.is_err() {
             return Err(adapter_state_error("记录与当前管理员设置或有效配置不一致"));
         }
-        if self.routes.len() > 1 {
+        let required_gateway = if self.routes.is_empty() {
+            None
+        } else {
+            let target = config::server_probe_target(&settings.data_dir, active)?;
+            Some(target)
+        };
+        validate_route_states(&self.routes, address.unwrap(), required_gateway)?;
+        Ok(())
+    }
+}
+
+fn validate_route_states(
+    routes: &[RouteState],
+    own_ip: std::net::Ipv4Addr,
+    required_gateway: Option<std::net::Ipv4Addr>,
+) -> Result<()> {
+    if routes.len() > MAX_MANAGED_ROUTES {
+        return Err(adapter_state_error("记录中的路由数量超过安全上限"));
+    }
+    let mut destinations = BTreeSet::new();
+    for route in routes {
+        let destination = route
+            .destination
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| adapter_state_error("记录包含无效 IPv4 路由"))?;
+        let octets = destination.octets();
+        if route.prefix != 32
+            || destination == own_ip
+            || destination.is_unspecified()
+            || destination.is_loopback()
+            || destination.is_multicast()
+            || octets == [255, 255, 255, 255]
+            || (octets[0] == 169 && octets[1] == 254)
+            || !destinations.insert(destination)
+        {
             return Err(adapter_state_error("记录包含非预期路由"));
         }
-        if let Some(route) = self.routes.first() {
-            let target = config::server_probe_target(&settings.data_dir, active)?;
-            if route.destination != target.to_string() || route.prefix != 32 {
-                return Err(adapter_state_error("路由与当前服务端节点不一致"));
-            }
-        }
-        Ok(())
+    }
+    if required_gateway.is_some_and(|gateway| !destinations.contains(&gateway)) {
+        return Err(adapter_state_error("记录缺少当前服务端节点路由"));
+    }
+    Ok(())
+}
+
+fn forget_route(routes: &mut Vec<RouteState>, deleted: &RouteState) {
+    if let Some(index) = routes.iter().position(|route| route == deleted) {
+        routes.remove(index);
     }
 }
 
@@ -759,7 +799,7 @@ impl Engine {
     }
 
     fn adapter_cleanup_pending(&self) -> bool {
-        self.adapter_address_configured || {
+        self.adapter_address_configured || !self.adapter_routes.is_empty() || {
             #[cfg(unix)]
             {
                 self.adapter_link_touched
@@ -840,7 +880,12 @@ impl Engine {
                     route.prefix,
                 ));
                 match run_adapter(c).await {
-                    Ok(()) => self.adapter_routes.clear(),
+                    Ok(()) => {
+                        forget_route(&mut self.adapter_routes, &route);
+                        if let Err(error) = self.write_adapter_state(ip) {
+                            first_error.get_or_insert(error);
+                        }
+                    }
                     Err(error) => first_error = Some(error),
                 }
             }
@@ -853,7 +898,12 @@ impl Engine {
                     route.prefix,
                 ));
                 match run_adapter(c).await {
-                    Ok(()) => self.adapter_routes.clear(),
+                    Ok(()) => {
+                        forget_route(&mut self.adapter_routes, &route);
+                        if let Err(error) = self.write_adapter_state(ip) {
+                            first_error.get_or_insert(error);
+                        }
+                    }
                     Err(error) => first_error = Some(error),
                 }
             }
@@ -1304,5 +1354,51 @@ mod adapter_state_tests {
             .unwrap()
             .insert("unexpected".into(), serde_json::Value::Bool(true));
         assert!(serde_json::from_value::<AdapterState>(value).is_err());
+    }
+
+    #[test]
+    fn managed_route_state_accepts_exact_peers_and_rejects_unsafe_entries() {
+        let gateway = "10.42.0.1".parse().unwrap();
+        let own = "10.42.0.2".parse().unwrap();
+        let routes = vec![
+            RouteState {
+                destination: "10.42.0.1".into(),
+                prefix: 32,
+            },
+            RouteState {
+                destination: "10.42.0.3".into(),
+                prefix: 32,
+            },
+        ];
+        validate_route_states(&routes, own, Some(gateway)).unwrap();
+
+        let mut invalid = routes.clone();
+        invalid[1].prefix = 24;
+        assert!(validate_route_states(&invalid, own, Some(gateway)).is_err());
+
+        let mut missing_gateway = routes.clone();
+        missing_gateway.remove(0);
+        assert!(validate_route_states(&missing_gateway, own, Some(gateway)).is_err());
+
+        let mut duplicate = routes.clone();
+        duplicate.push(routes[1].clone());
+        assert!(validate_route_states(&duplicate, own, Some(gateway)).is_err());
+    }
+
+    #[test]
+    fn successful_route_cleanup_forgets_only_the_deleted_route() {
+        let gateway = RouteState {
+            destination: "10.42.0.1".into(),
+            prefix: 32,
+        };
+        let peer = RouteState {
+            destination: "10.42.0.3".into(),
+            prefix: 32,
+        };
+        let mut routes = vec![gateway.clone(), peer.clone()];
+
+        forget_route(&mut routes, &gateway);
+
+        assert_eq!(routes, vec![peer]);
     }
 }
