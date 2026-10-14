@@ -1,7 +1,7 @@
-use crate::{identifier, Error, Identity, Result};
+use crate::{identifier, AllowedRoute, Error, Identity, Result};
 use reqwest::{redirect::Policy, Client};
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::{collections::BTreeSet, net::Ipv4Addr, time::Duration};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -27,8 +27,55 @@ fn has_media_type(value: Option<&str>, expected: &str) -> bool {
 pub struct Session {
     pub identity: Identity,
     pub origin: String,
+    allowed_routes: Vec<AllowedRoute>,
     token: Zeroizing<String>,
     client: Client,
+}
+
+const MAX_ALLOWED_ROUTES: usize = 1024;
+
+fn parse_allowed_routes(value: &Value, own_ip: Ipv4Addr) -> Result<Option<Vec<AllowedRoute>>> {
+    let Some(routes) = value.get("allowed_routes") else {
+        return Ok(None);
+    };
+    let routes = routes
+        .as_array()
+        .ok_or_else(|| Error::protocol("allowed_routes 必须是 IPv4 /32 路由数组"))?;
+    if routes.len() > MAX_ALLOWED_ROUTES {
+        return Err(Error::protocol("allowed_routes 超过客户端安全上限"));
+    }
+    let mut parsed = BTreeSet::new();
+    for route in routes {
+        let route = route
+            .as_str()
+            .filter(|route| !route.is_empty() && route.trim() == *route)
+            .ok_or_else(|| Error::protocol("allowed_routes 包含无效路由"))?;
+        let (address, _) = route
+            .split_once('/')
+            .filter(|(_, prefix)| *prefix == "32")
+            .ok_or_else(|| Error::protocol("allowed_routes 仅支持 IPv4 /32 路由"))?;
+        if address.contains('/') {
+            return Err(Error::protocol("allowed_routes 包含无效路由"));
+        }
+        let destination = address
+            .parse::<Ipv4Addr>()
+            .map_err(|_| Error::protocol("allowed_routes 包含无效 IPv4 地址"))?;
+        let octets = destination.octets();
+        if destination == own_ip
+            || destination.is_unspecified()
+            || destination.is_loopback()
+            || destination.is_multicast()
+            || octets == [255, 255, 255, 255]
+            || (octets[0] == 169 && octets[1] == 254)
+        {
+            return Err(Error::protocol("allowed_routes 包含不允许的目标地址"));
+        }
+        parsed.insert(AllowedRoute {
+            destination,
+            prefix: 32,
+        });
+    }
+    Ok(Some(parsed.into_iter().collect()))
 }
 
 pub fn origin(value: &str, allow_http: bool) -> Result<Url> {
@@ -344,24 +391,29 @@ impl Session {
             }
         }
 
+        let node_ip = field("node_ip")?;
+        let node_address = node_ip
+            .parse::<Ipv4Addr>()
+            .map_err(|_| Error::protocol("后台分配的 node_ip 必须是 IPv4 地址"))?;
+        let allowed_routes = parse_allowed_routes(&v, node_address)?.unwrap_or_default();
         let identity = Identity {
             sid: returned_sid,
             net_name: returned_net_name,
-            node_ip: field("node_ip")?,
+            node_ip,
             node_id: v["node_id"].as_u64(),
             network_id: v["network_id"].as_u64(),
             access_code: returned_access_code.or(normalized_access_code),
         };
-        identity
-            .node_ip
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| Error::protocol("后台分配的 node_ip 必须是 IPv4 地址"))?;
         Ok(Self {
             identity,
             origin,
+            allowed_routes,
             token: Zeroizing::new(field("token")?),
             client,
         })
+    }
+    pub fn allowed_routes(&self) -> &[AllowedRoute] {
+        &self.allowed_routes
     }
     pub async fn download(&self) -> Result<Vec<u8>> {
         let response = post(
@@ -408,15 +460,28 @@ impl Session {
         String::from_utf8(response.body)
             .map_err(|_| Error::protocol("公钥上传响应不是 UTF-8 主机配置"))
     }
-    pub async fn keepalive(&self) -> Result<()> {
-        post(
+    pub async fn keepalive(&self) -> Result<Option<Vec<AllowedRoute>>> {
+        let response = post(
             &self.client,
             &self.origin,
             "/api/tinc/client/keepalive",
             json!({"sid":self.identity.sid,"token":self.token.as_str()}),
             64 * 1024,
         )
-        .await
-        .map(|_| ())
+        .await?;
+        if !has_media_type(response.content_type.as_deref(), "application/json") {
+            return Err(Error::protocol("心跳成功响应必须是 application/json"));
+        }
+        let value: Value = serde_json::from_slice(&response.body)
+            .map_err(|_| Error::protocol("心跳响应不是有效 JSON"))?;
+        if value["status"] != json!("success") {
+            return Err(Error::protocol("心跳响应缺少成功状态"));
+        }
+        let own_ip = self
+            .identity
+            .node_ip
+            .parse::<Ipv4Addr>()
+            .map_err(|_| Error::protocol("活动节点地址无效"))?;
+        parse_allowed_routes(&value, own_ip)
     }
 }

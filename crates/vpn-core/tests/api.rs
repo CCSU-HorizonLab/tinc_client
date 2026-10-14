@@ -235,6 +235,81 @@ async fn keepalive_maps_backend_failure_as_retryable() {
     assert!(!error.message.contains("secret"));
     task.abort();
 }
+
+#[tokio::test]
+async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|| async {
+                Json(json!({
+                    "status": 1,
+                    "sid": "client_a",
+                    "token": "opaque",
+                    "net_name": "office",
+                    "node_ip": "10.42.0.2",
+                    "allowed_routes": ["10.42.0.4/32", "10.42.0.3/32", "10.42.0.3/32"]
+                }))
+            }),
+        )
+        .route(
+            "/api/tinc/client/keepalive",
+            post(|| async {
+                Json(json!({
+                    "status": "success",
+                    "allowed_routes": ["10.42.0.5/32"]
+                }))
+            }),
+        );
+    let (url, task) = serve(app).await;
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
+        .await
+        .unwrap();
+
+    assert_eq!(session.allowed_routes().len(), 2);
+    assert_eq!(
+        session.allowed_routes()[0].destination.to_string(),
+        "10.42.0.3"
+    );
+    assert_eq!(session.allowed_routes()[0].prefix, 32);
+    let refreshed = session.keepalive().await.unwrap().unwrap();
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].destination.to_string(), "10.42.0.5");
+    task.abort();
+}
+
+#[tokio::test]
+async fn rejects_unsafe_or_broad_routes_from_the_backend() {
+    for route in [
+        "10.42.0.0/24",
+        "10.42.0.2/32",
+        "127.0.0.1/32",
+        "169.254.1.2/32",
+    ] {
+        let app = Router::new().route(
+            "/api/tinc/client/login",
+            post(move || async move {
+                Json(json!({
+                    "status": 1,
+                    "sid": "client_a",
+                    "token": "opaque",
+                    "net_name": "office",
+                    "node_ip": "10.42.0.2",
+                    "allowed_routes": [route]
+                }))
+            }),
+        );
+        let (url, task) = serve(app).await;
+
+        let error = Session::login(&url, None, Some("client_a"), "password", true)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(error.code, "protocol");
+        task.abort();
+    }
+}
 #[tokio::test]
 async fn repeated_uploads_keep_the_same_authenticated_public_content() {
     let seen = Arc::new(Mutex::new(Vec::new()));

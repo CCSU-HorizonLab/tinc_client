@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::Ipv4Addr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{message}")]
@@ -27,6 +28,12 @@ impl Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AllowedRoute {
+    pub destination: Ipv4Addr,
+    pub prefix: u8,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
