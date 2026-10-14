@@ -1,10 +1,74 @@
 #![cfg(windows)]
-use std::{ffi::c_void, io, ptr};
+use std::{ffi::c_void, io, net::Ipv4Addr, ptr};
 use windows_sys::Win32::{
     Foundation::*,
+    NetworkManagement::{IpHelper::*, Ndis::NET_LUID_LH},
+    Networking::WinSock::*,
     Security::{Authorization::*, *},
     System::{Pipes::*, Services::*, Threading::*},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv4Route {
+    pub interface_index: u32,
+    pub prefix_length: u8,
+}
+
+pub fn interface_index(alias: &str) -> io::Result<u32> {
+    let alias: Vec<u16> = alias.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
+    let error = unsafe { ConvertInterfaceAliasToLuid(alias.as_ptr(), &mut luid) };
+    if error != NO_ERROR {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    let mut index = 0;
+    let error = unsafe { ConvertInterfaceLuidToIndex(&luid, &mut index) };
+    if error != NO_ERROR {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    Ok(index)
+}
+
+pub fn best_ipv4_route(target: Ipv4Addr) -> io::Result<Ipv4Route> {
+    let octets = target.octets();
+    let destination = SOCKADDR_INET {
+        Ipv4: SOCKADDR_IN {
+            sin_family: AF_INET,
+            sin_port: 0,
+            sin_addr: IN_ADDR {
+                S_un: IN_ADDR_0 {
+                    S_un_b: IN_ADDR_0_0 {
+                        s_b1: octets[0],
+                        s_b2: octets[1],
+                        s_b3: octets[2],
+                        s_b4: octets[3],
+                    },
+                },
+            },
+            sin_zero: [0; 8],
+        },
+    };
+    let mut route: MIB_IPFORWARD_ROW2 = unsafe { std::mem::zeroed() };
+    let mut source: SOCKADDR_INET = unsafe { std::mem::zeroed() };
+    let error = unsafe {
+        GetBestRoute2(
+            ptr::null(),
+            0,
+            ptr::null(),
+            &destination,
+            0,
+            &mut route,
+            &mut source,
+        )
+    };
+    if error != NO_ERROR {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    Ok(Ipv4Route {
+        interface_index: route.InterfaceIndex,
+        prefix_length: route.DestinationPrefix.PrefixLength,
+    })
+}
 
 pub struct PipeSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
