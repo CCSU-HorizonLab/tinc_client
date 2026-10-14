@@ -858,6 +858,30 @@ impl Engine {
         }
         #[cfg(windows)]
         {
+            let tinc_index =
+                platform_windows::interface_index(&self.settings.interface).map_err(|_| {
+                    Error::new(
+                        "route_check",
+                        "无法确认 Tinc 虚拟网卡，已取消添加路由；请检查网卡安装状态",
+                        true,
+                    )
+                })?;
+            let best = platform_windows::best_ipv4_route(target).map_err(|_| {
+                Error::new(
+                    "route_check",
+                    "无法检查目标地址的现有系统路由，已取消添加路由",
+                    true,
+                )
+            })?;
+            if windows_route_conflicts(best, tinc_index) {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 与本机现有网络路由冲突，未修改系统路由；请断开冲突网络或联系管理员调整 VPN 地址"
+                    ),
+                    false,
+                ));
+            }
             let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
             let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
             c.args(windows_add_route_args(&self.settings.interface, target));
@@ -913,9 +937,12 @@ impl Engine {
         let plan = route_plan(&self.adapter_routes, desired);
         let changed = !plan.add.is_empty() || !plan.remove.is_empty();
         for route in &plan.add {
-            self.install_managed_route(&ip, route).await.map_err(|_| {
-                Error::new("route_sync", "新增授权节点路由失败，将在下次心跳重试", true)
-            })?;
+            self.install_managed_route(&ip, route)
+                .await
+                .map_err(|error| match error.code.as_str() {
+                    "route_conflict" | "route_check" => error,
+                    _ => Error::new("route_sync", "新增授权节点路由失败，将在下次心跳重试", true),
+                })?;
         }
         for route in &plan.remove {
             self.remove_managed_route(&ip, route).await.map_err(|_| {
@@ -1209,6 +1236,11 @@ fn windows_add_route_args(interface: &str, target: std::net::Ipv4Addr) -> Vec<St
 }
 
 #[cfg(windows)]
+fn windows_route_conflicts(best: platform_windows::Ipv4Route, tinc_index: u32) -> bool {
+    best.prefix_length > 0 && best.interface_index != tinc_index
+}
+
+#[cfg(windows)]
 fn windows_delete_route_args(interface: &str, target: &str, prefix: u8) -> Vec<String> {
     vec![
         "interface".into(),
@@ -1367,6 +1399,42 @@ mod windows_tests {
                 "store=active",
             ]
         );
+    }
+
+    #[test]
+    fn route_conflict_ignores_default_route_and_owned_tinc_route() {
+        assert!(!windows_route_conflicts(
+            platform_windows::Ipv4Route {
+                interface_index: 7,
+                prefix_length: 0,
+            },
+            42,
+        ));
+        assert!(!windows_route_conflicts(
+            platform_windows::Ipv4Route {
+                interface_index: 42,
+                prefix_length: 32,
+            },
+            42,
+        ));
+    }
+
+    #[test]
+    fn route_conflict_rejects_more_specific_route_on_another_interface() {
+        assert!(windows_route_conflicts(
+            platform_windows::Ipv4Route {
+                interface_index: 7,
+                prefix_length: 24,
+            },
+            42,
+        ));
+        assert!(windows_route_conflicts(
+            platform_windows::Ipv4Route {
+                interface_index: 7,
+                prefix_length: 32,
+            },
+            42,
+        ));
     }
 }
 
