@@ -38,6 +38,16 @@ const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MANAGED_ROUTES: usize = 1025;
 
+fn background_keepalive_due(
+    child_running: bool,
+    process_running: bool,
+    last_keepalive: Option<tokio::time::Instant>,
+) -> bool {
+    child_running
+        && process_running
+        && last_keepalive.is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RouteState {
@@ -641,11 +651,8 @@ impl Engine {
         {
             self.probe_connection().await;
         }
-        if self.child.is_some()
-            && self
-                .last_keepalive
-                .is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
-        {
+        let process_running = self.status.read().await.process_running;
+        if background_keepalive_due(self.child.is_some(), process_running, self.last_keepalive) {
             let keepalive = if let Some(session) = self.session.as_ref() {
                 self.last_keepalive = Some(tokio::time::Instant::now());
                 Some(session.keepalive().await)
@@ -1628,5 +1635,16 @@ mod adapter_state_tests {
             changes,
             vec![RouteChange::Remove(stale), RouteChange::Add(added)]
         );
+    }
+
+    #[test]
+    fn background_keepalive_waits_for_fully_running_state() {
+        assert!(!background_keepalive_due(true, false, None));
+        assert!(background_keepalive_due(true, true, None));
+        assert!(!background_keepalive_due(
+            true,
+            true,
+            Some(tokio::time::Instant::now())
+        ));
     }
 }
