@@ -168,24 +168,25 @@ fn managed_routes(
 }
 
 #[derive(Debug, PartialEq)]
-struct RoutePlan {
-    add: Vec<RouteState>,
-    remove: Vec<RouteState>,
+enum RouteChange {
+    Remove(RouteState),
+    Add(RouteState),
 }
 
-fn route_plan(current: &[RouteState], desired: &[RouteState]) -> RoutePlan {
-    RoutePlan {
-        add: desired
-            .iter()
-            .filter(|route| !current.contains(route))
-            .cloned()
-            .collect(),
-        remove: current
-            .iter()
-            .filter(|route| !desired.contains(route))
-            .cloned()
-            .collect(),
-    }
+fn route_changes(current: &[RouteState], desired: &[RouteState]) -> Vec<RouteChange> {
+    current
+        .iter()
+        .filter(|route| !desired.contains(route))
+        .cloned()
+        .map(RouteChange::Remove)
+        .chain(
+            desired
+                .iter()
+                .filter(|route| !current.contains(route))
+                .cloned()
+                .map(RouteChange::Add),
+        )
+        .collect()
 }
 
 fn adapter_state_error(reason: &str) -> Error {
@@ -934,20 +935,28 @@ impl Engine {
             .identity
             .node_ip
             .clone();
-        let plan = route_plan(&self.adapter_routes, desired);
-        let changed = !plan.add.is_empty() || !plan.remove.is_empty();
-        for route in &plan.add {
-            self.install_managed_route(&ip, route)
-                .await
-                .map_err(|error| match error.code.as_str() {
-                    "route_conflict" | "route_check" => error,
-                    _ => Error::new("route_sync", "新增授权节点路由失败，将在下次心跳重试", true),
-                })?;
-        }
-        for route in &plan.remove {
-            self.remove_managed_route(&ip, route).await.map_err(|_| {
-                Error::new("route_sync", "撤销过期节点路由失败，将在下次心跳重试", true)
-            })?;
+        let changes = route_changes(&self.adapter_routes, desired);
+        let changed = !changes.is_empty();
+        for change in changes {
+            match change {
+                RouteChange::Remove(route) => {
+                    self.remove_managed_route(&ip, &route).await.map_err(|_| {
+                        Error::new("route_sync", "撤销过期节点路由失败，将在下次心跳重试", true)
+                    })?;
+                }
+                RouteChange::Add(route) => {
+                    self.install_managed_route(&ip, &route)
+                        .await
+                        .map_err(|error| match error.code.as_str() {
+                            "route_conflict" | "route_check" => error,
+                            _ => Error::new(
+                                "route_sync",
+                                "新增授权节点路由失败，将在下次心跳重试",
+                                true,
+                            ),
+                        })?;
+                }
+            }
         }
         if changed {
             self.log("已根据服务端授权快照同步节点路由").await;
@@ -1596,7 +1605,7 @@ mod adapter_state_tests {
     }
 
     #[test]
-    fn route_plan_adds_new_routes_and_removes_only_stale_owned_routes() {
+    fn route_changes_revoke_stale_routes_before_adding_new_routes() {
         let gateway = RouteState {
             destination: "10.42.0.1".into(),
             prefix: 32,
@@ -1610,12 +1619,14 @@ mod adapter_state_tests {
             prefix: 32,
         };
 
-        let plan = route_plan(
+        let changes = route_changes(
             &[gateway.clone(), stale.clone()],
             &[gateway.clone(), added.clone()],
         );
 
-        assert_eq!(plan.add, vec![added]);
-        assert_eq!(plan.remove, vec![stale]);
+        assert_eq!(
+            changes,
+            vec![RouteChange::Remove(stale), RouteChange::Add(added)]
+        );
     }
 }
