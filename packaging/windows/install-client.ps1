@@ -256,6 +256,23 @@ function Write-JsonAtomically {
     Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
 
+function Restore-UpgradeFile {
+    param(
+        [string]$BackupPath,
+        [string]$DestinationPath,
+        [bool]$ExistedBeforeUpgrade
+    )
+
+    if ($ExistedBeforeUpgrade) {
+        if (-not (Test-Path -LiteralPath $BackupPath -PathType Leaf)) {
+            throw "Upgrade backup is incomplete: $BackupPath"
+        }
+        Copy-Item -LiteralPath $BackupPath -Destination $DestinationPath -Force
+    } elseif (Test-Path -LiteralPath $DestinationPath -PathType Leaf) {
+        Remove-Item -LiteralPath $DestinationPath -Force
+    }
+}
+
 Write-Step "Validating the offline installation payload."
 $manifestPath = Resolve-PayloadFile "payload-manifest.json"
 $agentSource = Resolve-PayloadFile "vpn-agent.exe"
@@ -315,23 +332,52 @@ Write-Step "Installation log: $InstallLogPath"
 $ownerSid = Get-InteractiveOwnerSid
 $existingService = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
 $agentPath = Join-Path $AgentRoot "vpn-agent.exe"
+$installedTincPath = Join-Path $AgentRoot "tinc\tincd.exe"
 $expectedServiceCommand = '"' + $agentPath + '" --service'
 $serviceWasRunning = $false
 $serviceCreatedThisRun = $false
-
-if ($null -ne $existingService) {
-    if ($existingService.PathName -ne $expectedServiceCommand) {
-        throw "Service $ServiceName exists with an unexpected executable path: $($existingService.PathName)"
-    }
-    $serviceWasRunning = $existingService.State -eq "Running"
-    if ($existingService.State -ne "Stopped") {
-        Write-Step "Stopping the existing Agent service for an in-place upgrade."
-        Stop-Service -Name $ServiceName -Force
-        Wait-ServiceState -Name $ServiceName -State "Stopped"
-    }
-}
+$existingServiceValidated = $false
+$rollbackRoot = Join-Path $DataRoot "upgrade-backup"
+$rollbackPrepared = $false
+$agentExisted = Test-Path -LiteralPath $agentPath -PathType Leaf
+$tincExisted = Test-Path -LiteralPath $installedTincPath -PathType Leaf
+$settingsExisted = Test-Path -LiteralPath $SettingsPath -PathType Leaf
+$installStateExisted = Test-Path -LiteralPath $InstallStatePath -PathType Leaf
 
 try {
+    if ($null -ne $existingService) {
+        if ($existingService.PathName -ne $expectedServiceCommand) {
+            throw "Service $ServiceName exists with an unexpected executable path: $($existingService.PathName)"
+        }
+        if (-not $agentExisted) {
+            throw "The existing Agent service executable is missing: $agentPath"
+        }
+        if (Test-Path -LiteralPath $rollbackRoot) {
+            throw "A previous upgrade backup still exists at $rollbackRoot. Resolve it before retrying."
+        }
+        $existingServiceValidated = $true
+        $serviceWasRunning = $existingService.State -eq "Running"
+        if ($existingService.State -ne "Stopped") {
+            Write-Step "Stopping the existing Agent service for an in-place upgrade."
+            Stop-Service -Name $ServiceName -Force
+            Wait-ServiceState -Name $ServiceName -State "Stopped"
+        }
+
+        New-Item -ItemType Directory -Path $rollbackRoot -Force | Out-Null
+        Set-ProtectedDirectoryAcl -Path $rollbackRoot
+        Copy-Item -LiteralPath $agentPath -Destination (Join-Path $rollbackRoot "vpn-agent.exe")
+        if ($tincExisted) {
+            Copy-Item -LiteralPath $installedTincPath -Destination (Join-Path $rollbackRoot "tincd.exe")
+        }
+        if ($settingsExisted) {
+            Copy-Item -LiteralPath $SettingsPath -Destination (Join-Path $rollbackRoot "settings.json")
+        }
+        if ($installStateExisted) {
+            Copy-Item -LiteralPath $InstallStatePath -Destination (Join-Path $rollbackRoot "install-state.json")
+        }
+        $rollbackPrepared = $true
+    }
+
     $tapResult = Ensure-TapAdapter -TapInstaller $tapSource
 
     foreach ($directory in @($AgentRoot, (Join-Path $AgentRoot "tinc"), $DataRoot, $DataDirectory)) {
@@ -345,7 +391,6 @@ try {
     Assert-FileHash -Path "$agentPath.new" -ExpectedSha256 $manifest.agentSha256 -Label "installed Agent staging file"
     Move-Item -LiteralPath "$agentPath.new" -Destination $agentPath -Force
 
-    $installedTincPath = Join-Path $AgentRoot "tinc\tincd.exe"
     Copy-Item -LiteralPath $tincSource -Destination "$installedTincPath.new" -Force
     Assert-FileHash -Path "$installedTincPath.new" -ExpectedSha256 $ExpectedTincSha256 -Label "installed Tinc staging file"
     Move-Item -LiteralPath "$installedTincPath.new" -Destination $installedTincPath -Force
@@ -425,21 +470,54 @@ try {
         throw "The dedicated '$InterfaceName' TAP adapter could not be verified after installation."
     }
 
+    if ($rollbackPrepared) {
+        Remove-Item -LiteralPath $rollbackRoot -Recurse -Force
+        $rollbackPrepared = $false
+    }
+
     Write-Step "Installation completed: desktop prerequisites, Agent service, Tinc, and TAP adapter are ready."
 } catch {
-    Write-Host "[Tinc Connect] ERROR: $($_.Exception.Message)"
-    if ($serviceWasRunning -and $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+    $installationError = $_
+    Write-Host "[Tinc Connect] ERROR: $($installationError.Exception.Message)"
+    if ($existingServiceValidated) {
         try {
-            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $currentService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($null -ne $currentService -and $currentService.Status -ne "Stopped") {
+                Stop-Service -Name $ServiceName -Force
+                Wait-ServiceState -Name $ServiceName -State "Stopped"
+            }
+            if ($rollbackPrepared) {
+                Restore-UpgradeFile -BackupPath (Join-Path $rollbackRoot "vpn-agent.exe") -DestinationPath $agentPath -ExistedBeforeUpgrade $agentExisted
+                Restore-UpgradeFile -BackupPath (Join-Path $rollbackRoot "tincd.exe") -DestinationPath $installedTincPath -ExistedBeforeUpgrade $tincExisted
+                Restore-UpgradeFile -BackupPath (Join-Path $rollbackRoot "settings.json") -DestinationPath $SettingsPath -ExistedBeforeUpgrade $settingsExisted
+                Restore-UpgradeFile -BackupPath (Join-Path $rollbackRoot "install-state.json") -DestinationPath $InstallStatePath -ExistedBeforeUpgrade $installStateExisted
+                Remove-Item -LiteralPath $rollbackRoot -Recurse -Force
+                $rollbackPrepared = $false
+                Write-Step "Restored the previous Agent runtime and settings after the failed upgrade."
+            } elseif (Test-Path -LiteralPath $rollbackRoot) {
+                Remove-Item -LiteralPath $rollbackRoot -Recurse -Force -ErrorAction SilentlyContinue
+                if (Test-Path -LiteralPath $rollbackRoot) {
+                    Write-Warning "An incomplete pre-upgrade backup could not be removed: $rollbackRoot"
+                }
+            }
+            if ($serviceWasRunning) {
+                Start-Service -Name $ServiceName
+                Wait-ServiceState -Name $ServiceName -State "Running"
+                Wait-AgentPipe
+            }
         } catch {
-            Write-Warning "The previous Agent service could not be restarted after installation failure."
+            if (Test-Path -LiteralPath $rollbackRoot) {
+                Write-Warning "The previous Agent installation could not be fully restored. Protected backup retained at ${rollbackRoot}: $($_.Exception.Message)"
+            } else {
+                Write-Warning "The previous files were restored, but the Agent service could not be verified after rollback: $($_.Exception.Message)"
+            }
         }
     }
     if ($serviceCreatedThisRun) {
         Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
         & sc.exe delete $ServiceName | Out-Null
     }
-    throw
+    throw $installationError
 } finally {
     if ($transcriptStarted) {
         try {

@@ -49,6 +49,11 @@ for(const variable of ['named','renamed','installedAdapter']){
 assert.match(clientInstaller,/@\(Compare-Object -ReferenceObject \$expectedSettingNames -DifferenceObject \$settingNames\)\.Count/,'Settings differences must remain an array under StrictMode');
 assert.match(clientInstaller,/\[IO\.File\]::WriteAllText\(\$temporaryPath, \$json, \(New-Object Text\.UTF8Encoding\(\$false\)\)\)/,'Installer JSON must be UTF-8 without BOM for Rust serde_json');
 assert.doesNotMatch(clientInstaller,/ConvertTo-Json[^\r\n|]*\|\s*Set-Content[^\r\n]*-Encoding UTF8/,'Windows PowerShell 5.1 Set-Content UTF8 adds a BOM that Rust rejects');
+assert(clientInstaller.indexOf('Copy-Item -LiteralPath $agentPath -Destination (Join-Path $rollbackRoot "vpn-agent.exe")')<clientInstaller.indexOf('Installing the verified Agent and Tinc runtime.'),'Upgrade backup must be created before replacing the Agent');
+assert.match(clientInstaller,/Set-ProtectedDirectoryAcl -Path \$rollbackRoot/,'Upgrade backup must inherit neither ordinary-user ACLs nor parent permissions');
+assert.match(clientInstaller,/Restore-UpgradeFile[\s\S]*-DestinationPath \$agentPath[\s\S]*-DestinationPath \$installedTincPath[\s\S]*-DestinationPath \$SettingsPath[\s\S]*-DestinationPath \$InstallStatePath/,'Failed upgrades must restore runtime and settings together');
+assert.match(clientInstaller,/Stop-Service -Name \$ServiceName -Force[\s\S]*Restore-UpgradeFile/,'Rollback must stop a partially started replacement Agent before restoring its executable');
+assert.doesNotMatch(clientInstaller,/Start-Service -Name \$ServiceName -ErrorAction SilentlyContinue/,'Rollback must not report success when the previous service cannot restart');
 assert(clientInstaller.includes("O=OpenVPN Inc\\."),'Installer must constrain the TAP Authenticode signer');
 assert.match(clientUninstaller,/ProgramData\\TincClient[\s\S]*preserve/i,'Uninstaller must preserve user network data and key material');
 assert.match(clientUninstaller,/PathName -ne \$expectedCommand/,'Uninstaller must not delete a same-named unexpected service');
@@ -92,6 +97,33 @@ try {
 }`;
   const utf8NoBomCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',utf8NoBom],{encoding:'utf8'});
   assert.equal(utf8NoBomCheck.status,0,utf8NoBomCheck.stderr||utf8NoBomCheck.stdout);
+  const rollbackRestore=`
+Set-StrictMode -Version Latest
+$tokens=$null
+$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:TINC_CLIENT_SCRIPT,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw $errors[0] }
+$functionAst=$ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Restore-UpgradeFile' },$true)
+if ($null -eq $functionAst) { throw 'Restore-UpgradeFile was not found.' }
+. ([scriptblock]::Create($functionAst.Extent.Text))
+$root=Join-Path ([IO.Path]::GetTempPath()) ('tinc-rollback-test-'+[guid]::NewGuid().ToString('N'))
+try {
+  New-Item -ItemType Directory -Path $root | Out-Null
+  $backup=Join-Path $root 'agent.backup'
+  $destination=Join-Path $root 'agent.exe'
+  [IO.File]::WriteAllText($backup,'old')
+  [IO.File]::WriteAllText($destination,'new')
+  Restore-UpgradeFile -BackupPath $backup -DestinationPath $destination -ExistedBeforeUpgrade $true
+  if ((Get-Content -LiteralPath $destination -Raw) -ne 'old') { throw 'Existing file was not restored.' }
+  $created=Join-Path $root 'created-during-upgrade.json'
+  [IO.File]::WriteAllText($created,'new')
+  Restore-UpgradeFile -BackupPath (Join-Path $root 'unused') -DestinationPath $created -ExistedBeforeUpgrade $false
+  if (Test-Path -LiteralPath $created) { throw 'New upgrade-only file was not removed.' }
+} finally {
+  Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}`;
+  const rollbackRestoreCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',rollbackRestore],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,'packaging/windows/install-client.ps1')}});
+  assert.equal(rollbackRestoreCheck.status,0,rollbackRestoreCheck.stderr||rollbackRestoreCheck.stdout);
 }
 if(process.platform!=='win32'){
   const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux/install-agent.sh')],{encoding:'utf8'});
