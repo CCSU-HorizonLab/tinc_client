@@ -279,6 +279,55 @@ async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
 }
 
 #[tokio::test]
+async fn two_nodes_receive_only_the_other_nodes_exact_route() {
+    let app = Router::new().route(
+        "/api/tinc/client/login",
+        post(|Json(value): Json<serde_json::Value>| async move {
+            let sid = value["sid"].as_str().unwrap();
+            let (node_ip, peer_ip, node_id) = match sid {
+                "client_a" => ("10.0.11.211", "10.0.11.212/32", 211),
+                "client_b" => ("10.0.11.212", "10.0.11.211/32", 212),
+                _ => panic!("unexpected fixture node"),
+            };
+            Json(json!({
+                "status": 1,
+                "sid": sid,
+                "token": format!("token-{sid}"),
+                "net_name": "office",
+                "node_ip": node_ip,
+                "node_id": node_id,
+                "network_id": 11,
+                "allowed_routes": [peer_ip]
+            }))
+        }),
+    );
+    let (url, task) = serve(app).await;
+
+    let a = Session::login(&url, None, Some("client_a"), "password", true)
+        .await
+        .unwrap();
+    let b = Session::login(&url, None, Some("client_b"), "password", true)
+        .await
+        .unwrap();
+
+    assert_eq!(a.identity.node_ip, "10.0.11.211");
+    assert_eq!(a.identity.network_id, Some(11));
+    assert_eq!(a.allowed_routes()[0].destination.to_string(), "10.0.11.212");
+    assert_eq!(b.identity.node_ip, "10.0.11.212");
+    assert_eq!(b.identity.network_id, Some(11));
+    assert_eq!(b.allowed_routes()[0].destination.to_string(), "10.0.11.211");
+    assert_ne!(
+        a.allowed_routes()[0].destination.to_string(),
+        a.identity.node_ip
+    );
+    assert_ne!(
+        b.allowed_routes()[0].destination.to_string(),
+        b.identity.node_ip
+    );
+    task.abort();
+}
+
+#[tokio::test]
 async fn rejects_unsafe_or_broad_routes_from_the_backend() {
     for route in [
         "10.42.0.0/24",

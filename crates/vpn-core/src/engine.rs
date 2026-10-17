@@ -61,12 +61,12 @@ struct AdapterState {
     node_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     network_id: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     route_revision: Option<u64>,
     #[serde(default)]
     desired_routes: Vec<RouteState>,
-    #[serde(default)]
-    routes: Vec<RouteState>,
+    #[serde(default, alias = "routes")]
+    owned_routes: Vec<RouteState>,
     #[serde(default)]
     pending_operations: Vec<RouteOperation>,
     #[cfg(unix)]
@@ -94,7 +94,7 @@ impl AdapterState {
             // populate it without changing ownership semantics.
             route_revision: None,
             desired_routes: route_manager.desired().to_vec(),
-            routes: route_manager.owned().to_vec(),
+            owned_routes: route_manager.owned().to_vec(),
             pending_operations: route_manager.pending().to_vec(),
             #[cfg(unix)]
             link_touched: _link_touched,
@@ -120,7 +120,7 @@ impl AdapterState {
         }
         let address = address.unwrap();
         let desired_routes = if self.version == 1 {
-            &self.routes
+            &self.owned_routes
         } else {
             &self.desired_routes
         };
@@ -131,7 +131,7 @@ impl AdapterState {
             Some(target)
         };
         validate_route_states(desired_routes, address, required_gateway)?;
-        validate_route_states(&self.routes, address, None)?;
+        validate_route_states(&self.owned_routes, address, None)?;
         if self.pending_operations.len() > MAX_MANAGED_ROUTES.saturating_mul(2) {
             return Err(adapter_state_error("记录中的待处理路由操作过多"));
         }
@@ -142,10 +142,10 @@ impl AdapterState {
             validate_route_states(std::slice::from_ref(route), address, None)?;
             let consistent = match operation {
                 RouteOperation::Add(route) => {
-                    desired_routes.contains(route) && !self.routes.contains(route)
+                    desired_routes.contains(route) && !self.owned_routes.contains(route)
                 }
                 RouteOperation::Remove(route) => {
-                    !desired_routes.contains(route) && self.routes.contains(route)
+                    !desired_routes.contains(route) && self.owned_routes.contains(route)
                 }
             };
             if !consistent {
@@ -158,11 +158,11 @@ impl AdapterState {
     fn route_manager(&self) -> RouteManager {
         RouteManager::restore(
             if self.version == 1 {
-                self.routes.clone()
+                self.owned_routes.clone()
             } else {
                 self.desired_routes.clone()
             },
-            self.routes.clone(),
+            self.owned_routes.clone(),
             self.pending_operations.clone(),
         )
     }
@@ -1686,6 +1686,35 @@ mod adapter_state_tests {
             .unwrap()
             .insert("unexpected".into(), serde_json::Value::Bool(true));
         assert!(serde_json::from_value::<AdapterState>(value).is_err());
+    }
+
+    #[test]
+    fn version_two_state_serializes_stable_ids_and_explicit_route_sets() {
+        let settings = settings();
+        let mut active = active();
+        active.identity.node_id = Some(211);
+        active.identity.network_id = Some(11);
+        let gateway = RouteState {
+            destination: "10.42.0.1".into(),
+            prefix: 32,
+        };
+        let manager = RouteManager::restore(
+            vec![gateway.clone()],
+            Vec::new(),
+            vec![RouteOperation::Add(gateway)],
+        );
+
+        let value = serde_json::to_value(AdapterState::current(&settings, &active, &manager, true))
+            .unwrap();
+
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["node_id"], 211);
+        assert_eq!(value["network_id"], 11);
+        assert!(value.get("desired_routes").is_some());
+        assert!(value.get("owned_routes").is_some());
+        assert!(value.get("pending_operations").is_some());
+        assert!(value.get("route_revision").is_some());
+        assert!(value.get("routes").is_none());
     }
 
     #[test]

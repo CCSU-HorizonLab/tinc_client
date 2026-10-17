@@ -208,6 +208,24 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_failure_keeps_failed_route_while_other_results_are_recorded() {
+        let gateway = route(1);
+        let peer_a = route(211);
+        let peer_b = route(212);
+        let routes = vec![gateway.clone(), peer_a.clone(), peer_b.clone()];
+        let mut manager = RouteManager::restore(routes.clone(), routes, Vec::new());
+        manager.begin_cleanup();
+
+        // The gateway deletion failed. The executor can still record the two
+        // successful peer deletions without losing ownership of the failure.
+        manager.complete(&RouteOperation::Remove(peer_a));
+        manager.complete(&RouteOperation::Remove(peer_b));
+
+        assert_eq!(manager.owned(), std::slice::from_ref(&gateway));
+        assert_eq!(manager.pending(), &[RouteOperation::Remove(gateway)]);
+    }
+
+    #[test]
     fn two_nodes_receive_gateway_and_other_peer_only() {
         let gateway = route(1);
         let node_a = route(211);
