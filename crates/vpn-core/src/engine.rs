@@ -1195,6 +1195,79 @@ impl Engine {
         )
     }
 
+    async fn preflight_route_add(&self, route: &RouteState) -> Result<()> {
+        let target = route
+            .destination
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| Error::protocol("服务端路由快照包含无效地址"))?;
+        #[cfg(windows)]
+        {
+            let tinc_index =
+                platform_windows::interface_index(&self.settings.interface).map_err(|_| {
+                    Error::new(
+                        "route_check",
+                        "无法确认 Tinc 虚拟网卡，已取消添加路由；请检查网卡安装状态",
+                        true,
+                    )
+                })?;
+            if platform_windows::exact_ipv4_route(tinc_index, target, route.prefix).map_err(
+                |_| {
+                    Error::new(
+                        "route_check",
+                        "无法核对 Tinc 虚拟网卡上的精确路由，已取消添加路由",
+                        true,
+                    )
+                },
+            )? {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 已存在于 Tinc 接口，但不属于当前 Agent；为避免误删，未接管该路由"
+                    ),
+                    false,
+                ));
+            }
+            let best = platform_windows::best_ipv4_route(target).map_err(|_| {
+                Error::new(
+                    "route_check",
+                    "无法检查目标地址的现有系统路由，已取消添加路由",
+                    true,
+                )
+            })?;
+            if windows_route_conflicts(best, tinc_index) {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 与本机现有网络路由冲突，未修改系统路由；请断开冲突网络或联系管理员调整 VPN 地址"
+                    ),
+                    false,
+                ));
+            }
+        }
+        #[cfg(unix)]
+        {
+            if self.linux_route_exists(route).await? {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 已存在于 Tinc 接口，但不属于当前 Agent；为避免误删，未接管该路由"
+                    ),
+                    false,
+                ));
+            }
+            if self.linux_route_conflicts(target).await? {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 与本机现有网络路由冲突，未修改系统路由；请断开冲突网络或联系管理员调整 VPN 地址"
+                    ),
+                    false,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     async fn reconcile_routes(&mut self, desired: &[RouteState]) -> Result<()> {
         let ip = self
             .active
@@ -1208,6 +1281,16 @@ impl Engine {
             || self.route_manager.owned() != desired;
         self.apply_pending_routes(&ip).await?;
         if self.route_manager.desired() != desired || self.route_manager.owned() != desired {
+            let additions: Vec<_> = desired
+                .iter()
+                .filter(|route| !self.route_manager.owned().contains(route))
+                .cloned()
+                .collect();
+            for route in additions {
+                // Inspect before journaling ownership. Existing routes are not
+                // adopted, so later cleanup cannot delete administrator state.
+                self.preflight_route_add(&route).await?;
+            }
             self.route_manager.plan(desired);
             // Persist the complete intent before the first OS mutation.
             self.write_adapter_state(&ip)?;
@@ -1651,11 +1734,11 @@ fn parse_linux_route_conflict(
     Some(best_conflicts)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn linux_add_route_args(interface: &str, target: std::net::Ipv4Addr) -> Vec<String> {
     vec![
         "route".into(),
-        "replace".into(),
+        "add".into(),
         format!("{target}/32"),
         "dev".into(),
         interface.into(),
@@ -1858,6 +1941,14 @@ mod linux_route_parser_tests {
             None
         );
     }
+
+    #[test]
+    fn linux_add_never_replaces_an_existing_route() {
+        assert_eq!(
+            linux_add_route_args("tinc0", "10.42.0.3".parse().unwrap()),
+            ["route", "add", "10.42.0.3/32", "dev", "tinc0"]
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -1884,7 +1975,7 @@ mod linux_tests {
         );
         assert_eq!(
             linux_add_route_args("tinc0", "10.42.0.1".parse().unwrap()),
-            ["route", "replace", "10.42.0.1/32", "dev", "tinc0"]
+            ["route", "add", "10.42.0.1/32", "dev", "tinc0"]
         );
         assert_eq!(
             linux_delete_route_args("tinc0", "10.42.0.1", 32),
