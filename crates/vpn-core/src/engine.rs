@@ -1,10 +1,10 @@
+use crate::route_manager::{validate_routes, RouteManager, RouteOperation, RouteState};
 use crate::{
     api::Session,
     config::{self, Active},
     keys, *,
 };
 use std::{
-    collections::BTreeSet,
     fs,
     path::Path,
     path::PathBuf,
@@ -31,7 +31,7 @@ fn default_prefix() -> u8 {
     24
 }
 
-const ADAPTER_STATE_VERSION: u8 = 1;
+const ADAPTER_STATE_VERSION: u8 = 2;
 const ADAPTER_STATE_FILE: &str = "adapter-state.json";
 const CONNECTIVITY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
@@ -48,13 +48,6 @@ fn background_keepalive_due(
         && last_keepalive.is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RouteState {
-    destination: String,
-    prefix: u8,
-}
-
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AdapterState {
@@ -64,8 +57,18 @@ struct AdapterState {
     prefix: u8,
     generation: String,
     profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_revision: Option<u64>,
+    #[serde(default)]
+    desired_routes: Vec<RouteState>,
     #[serde(default)]
     routes: Vec<RouteState>,
+    #[serde(default)]
+    pending_operations: Vec<RouteOperation>,
     #[cfg(unix)]
     link_touched: bool,
 }
@@ -74,7 +77,7 @@ impl AdapterState {
     fn current(
         settings: &Settings,
         active: &Active,
-        routes: Vec<RouteState>,
+        route_manager: &RouteManager,
         _link_touched: bool,
     ) -> Self {
         Self {
@@ -84,7 +87,15 @@ impl AdapterState {
             prefix: settings.interface_prefix,
             generation: active.generation.clone(),
             profile: active.profile.clone(),
-            routes,
+            node_id: active.identity.node_id,
+            network_id: active.identity.network_id,
+            // The current server contract has no route revision.  Keep the
+            // field explicit and empty so a future compatible contract can
+            // populate it without changing ownership semantics.
+            route_revision: None,
+            desired_routes: route_manager.desired().to_vec(),
+            routes: route_manager.owned().to_vec(),
+            pending_operations: route_manager.pending().to_vec(),
             #[cfg(unix)]
             link_touched: _link_touched,
         }
@@ -92,24 +103,68 @@ impl AdapterState {
 
     fn validate(&self, settings: &Settings, active: Option<&Active>) -> Result<()> {
         let active = active.ok_or_else(|| adapter_state_error("有效配置不存在"))?;
-        let matches = self.version == ADAPTER_STATE_VERSION
+        let supported_version = matches!(self.version, 1 | ADAPTER_STATE_VERSION);
+        let stable_identity_matches = self.version == 1
+            || (self.node_id == active.identity.node_id
+                && self.network_id == active.identity.network_id);
+        let matches = supported_version
             && self.interface == settings.interface
             && self.address == active.identity.node_ip
             && self.prefix == settings.interface_prefix
             && self.generation == active.generation
-            && self.profile == active.profile;
+            && self.profile == active.profile
+            && stable_identity_matches;
         let address = self.address.parse::<std::net::Ipv4Addr>();
         if !matches || address.is_err() {
             return Err(adapter_state_error("记录与当前管理员设置或有效配置不一致"));
         }
-        let required_gateway = if self.routes.is_empty() {
+        let address = address.unwrap();
+        let desired_routes = if self.version == 1 {
+            &self.routes
+        } else {
+            &self.desired_routes
+        };
+        let required_gateway = if desired_routes.is_empty() {
             None
         } else {
             let target = config::server_probe_target(&settings.data_dir, active)?;
             Some(target)
         };
-        validate_route_states(&self.routes, address.unwrap(), required_gateway)?;
+        validate_route_states(desired_routes, address, required_gateway)?;
+        validate_route_states(&self.routes, address, None)?;
+        if self.pending_operations.len() > MAX_MANAGED_ROUTES.saturating_mul(2) {
+            return Err(adapter_state_error("记录中的待处理路由操作过多"));
+        }
+        for operation in &self.pending_operations {
+            let route = match operation {
+                RouteOperation::Add(route) | RouteOperation::Remove(route) => route,
+            };
+            validate_route_states(std::slice::from_ref(route), address, None)?;
+            let consistent = match operation {
+                RouteOperation::Add(route) => {
+                    desired_routes.contains(route) && !self.routes.contains(route)
+                }
+                RouteOperation::Remove(route) => {
+                    !desired_routes.contains(route) && self.routes.contains(route)
+                }
+            };
+            if !consistent {
+                return Err(adapter_state_error("待处理路由操作与期望或归属状态不一致"));
+            }
+        }
         Ok(())
+    }
+
+    fn route_manager(&self) -> RouteManager {
+        RouteManager::restore(
+            if self.version == 1 {
+                self.routes.clone()
+            } else {
+                self.desired_routes.clone()
+            },
+            self.routes.clone(),
+            self.pending_operations.clone(),
+        )
     }
 }
 
@@ -118,38 +173,17 @@ fn validate_route_states(
     own_ip: std::net::Ipv4Addr,
     required_gateway: Option<std::net::Ipv4Addr>,
 ) -> Result<()> {
-    if routes.len() > MAX_MANAGED_ROUTES {
-        return Err(adapter_state_error("记录中的路由数量超过安全上限"));
+    if !validate_routes(routes, own_ip, MAX_MANAGED_ROUTES) {
+        return Err(adapter_state_error("记录包含非预期路由"));
     }
-    let mut destinations = BTreeSet::new();
-    for route in routes {
-        let destination = route
-            .destination
-            .parse::<std::net::Ipv4Addr>()
-            .map_err(|_| adapter_state_error("记录包含无效 IPv4 路由"))?;
-        let octets = destination.octets();
-        if route.prefix != 32
-            || destination == own_ip
-            || destination.is_unspecified()
-            || destination.is_loopback()
-            || destination.is_multicast()
-            || octets == [255, 255, 255, 255]
-            || (octets[0] == 169 && octets[1] == 254)
-            || !destinations.insert(destination)
-        {
-            return Err(adapter_state_error("记录包含非预期路由"));
-        }
-    }
-    if required_gateway.is_some_and(|gateway| !destinations.contains(&gateway)) {
+    if required_gateway.is_some_and(|gateway| {
+        !routes
+            .iter()
+            .any(|route| route.destination == gateway.to_string())
+    }) {
         return Err(adapter_state_error("记录缺少当前服务端节点路由"));
     }
     Ok(())
-}
-
-fn forget_route(routes: &mut Vec<RouteState>, deleted: &RouteState) {
-    if let Some(index) = routes.iter().position(|route| route == deleted) {
-        routes.remove(index);
-    }
 }
 
 fn managed_routes(
@@ -175,28 +209,6 @@ fn managed_routes(
         return Err(Error::protocol("服务端路由快照超过客户端安全上限"));
     }
     Ok(routes)
-}
-
-#[derive(Debug, PartialEq)]
-enum RouteChange {
-    Remove(RouteState),
-    Add(RouteState),
-}
-
-fn route_changes(current: &[RouteState], desired: &[RouteState]) -> Vec<RouteChange> {
-    current
-        .iter()
-        .filter(|route| !desired.contains(route))
-        .cloned()
-        .map(RouteChange::Remove)
-        .chain(
-            desired
-                .iter()
-                .filter(|route| !current.contains(route))
-                .cloned()
-                .map(RouteChange::Add),
-        )
-        .collect()
 }
 
 fn adapter_state_error(reason: &str) -> Error {
@@ -230,7 +242,7 @@ pub struct Engine {
     active: Option<Active>,
     child: Option<Child>,
     adapter_address_configured: bool,
-    adapter_routes: Vec<RouteState>,
+    route_manager: RouteManager,
     probe_target: Option<std::net::Ipv4Addr>,
     last_probe: Option<tokio::time::Instant>,
     probe_started_at: Option<tokio::time::Instant>,
@@ -283,9 +295,9 @@ impl Engine {
             active,
             child: None,
             adapter_address_configured: adapter_state.is_some(),
-            adapter_routes: adapter_state
+            route_manager: adapter_state
                 .as_ref()
-                .map(|state| state.routes.clone())
+                .map(AdapterState::route_manager)
                 .unwrap_or_default(),
             probe_target: None,
             last_probe: None,
@@ -824,9 +836,6 @@ impl Engine {
             run_adapter(c).await?;
             self.adapter_address_configured = true;
             self.write_adapter_state(ip)?;
-            for route in routes {
-                self.install_managed_route(ip, route).await?;
-            }
         }
         #[cfg(unix)]
         {
@@ -846,16 +855,15 @@ impl Engine {
             // already-down dedicated interface during recovery is harmless.
             self.write_adapter_state(ip)?;
             run_adapter(c).await?;
-            for route in routes {
-                self.install_managed_route(ip, route).await?;
-            }
         }
-        Ok(())
+        self.reconcile_routes(routes).await
     }
 
     async fn install_managed_route(&mut self, ip: &str, route: &RouteState) -> Result<()> {
-        if self.adapter_routes.contains(route) {
-            return Ok(());
+        if self.route_manager.owned().contains(route) {
+            self.route_manager
+                .complete(&RouteOperation::Add(route.clone()));
+            return self.write_adapter_state(ip);
         }
         let target = route
             .destination
@@ -901,13 +909,16 @@ impl Engine {
             c.args(linux_add_route_args(&self.settings.interface, target));
             run_adapter(c).await?;
         }
-        self.adapter_routes.push(route.clone());
+        let operation = RouteOperation::Add(route.clone());
+        self.route_manager.complete(&operation);
         self.write_adapter_state(ip)
     }
 
     async fn remove_managed_route(&mut self, ip: &str, route: &RouteState) -> Result<()> {
-        if !self.adapter_routes.contains(route) {
-            return Ok(());
+        if !self.route_manager.owned().contains(route) {
+            self.route_manager
+                .complete(&RouteOperation::Remove(route.clone()));
+            return self.write_adapter_state(ip);
         }
         #[cfg(windows)]
         {
@@ -930,7 +941,8 @@ impl Engine {
             ));
             run_adapter(c).await?;
         }
-        forget_route(&mut self.adapter_routes, route);
+        self.route_manager
+            .complete(&RouteOperation::Remove(route.clone()));
         self.write_adapter_state(ip)
     }
 
@@ -942,28 +954,15 @@ impl Engine {
             .identity
             .node_ip
             .clone();
-        let changes = route_changes(&self.adapter_routes, desired);
-        let changed = !changes.is_empty();
-        for change in changes {
-            match change {
-                RouteChange::Remove(route) => {
-                    self.remove_managed_route(&ip, &route).await.map_err(|_| {
-                        Error::new("route_sync", "撤销过期节点路由失败，将在下次心跳重试", true)
-                    })?;
-                }
-                RouteChange::Add(route) => {
-                    self.install_managed_route(&ip, &route)
-                        .await
-                        .map_err(|error| match error.code.as_str() {
-                            "route_conflict" | "route_check" => error,
-                            _ => Error::new(
-                                "route_sync",
-                                "新增授权节点路由失败，将在下次心跳重试",
-                                true,
-                            ),
-                        })?;
-                }
-            }
+        let changed = !self.route_manager.pending().is_empty()
+            || self.route_manager.desired() != desired
+            || self.route_manager.owned() != desired;
+        self.apply_pending_routes(&ip).await?;
+        if self.route_manager.desired() != desired || self.route_manager.owned() != desired {
+            self.route_manager.plan(desired);
+            // Persist the complete intent before the first OS mutation.
+            self.write_adapter_state(&ip)?;
+            self.apply_pending_routes(&ip).await?;
         }
         if changed {
             self.log("已根据服务端授权快照同步节点路由").await;
@@ -979,8 +978,33 @@ impl Engine {
         Ok(())
     }
 
+    async fn apply_pending_routes(&mut self, ip: &str) -> Result<()> {
+        for change in self.route_manager.pending().to_vec() {
+            match change {
+                RouteOperation::Remove(route) => {
+                    self.remove_managed_route(ip, &route).await.map_err(|_| {
+                        Error::new("route_sync", "撤销过期节点路由失败，将在下次心跳重试", true)
+                    })?;
+                }
+                RouteOperation::Add(route) => {
+                    self.install_managed_route(ip, &route)
+                        .await
+                        .map_err(|error| match error.code.as_str() {
+                            "route_conflict" | "route_check" => error,
+                            _ => Error::new(
+                                "route_sync",
+                                "新增授权节点路由失败，将在下次心跳重试",
+                                true,
+                            ),
+                        })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn adapter_cleanup_pending(&self) -> bool {
-        self.adapter_address_configured || !self.adapter_routes.is_empty() || {
+        self.adapter_address_configured || !self.route_manager.is_empty() || {
             #[cfg(unix)]
             {
                 self.adapter_link_touched
@@ -1000,7 +1024,7 @@ impl Engine {
         if active.identity.node_ip != ip {
             return Err(adapter_state_error("写入地址与有效配置不一致"));
         }
-        let state = AdapterState::current(&self.settings, active, self.adapter_routes.clone(), {
+        let state = AdapterState::current(&self.settings, active, &self.route_manager, {
             #[cfg(unix)]
             {
                 self.adapter_link_touched
@@ -1050,7 +1074,12 @@ impl Engine {
 
     async fn clear_adapter(&mut self, ip: &str) -> Result<()> {
         let mut first_error = None;
-        for route in self.adapter_routes.clone() {
+        self.route_manager.begin_cleanup();
+        self.write_adapter_state(ip)?;
+        for operation in self.route_manager.pending().to_vec() {
+            let RouteOperation::Remove(route) = operation else {
+                continue;
+            };
             if let Err(error) = self.remove_managed_route(ip, &route).await {
                 first_error.get_or_insert(error);
             }
@@ -1517,7 +1546,8 @@ mod adapter_state_tests {
     fn recovery_state_requires_exact_current_configuration() {
         let settings = settings();
         let active = active();
-        let mut state = AdapterState::current(&settings, &active, Vec::new(), true);
+        let manager = RouteManager::default();
+        let mut state = AdapterState::current(&settings, &active, &manager, true);
         state.validate(&settings, Some(&active)).unwrap();
 
         state.address = "10.42.0.3".into();
@@ -1525,7 +1555,7 @@ mod adapter_state_tests {
             state.validate(&settings, Some(&active)).unwrap_err().code,
             "adapter_state_invalid"
         );
-        assert!(AdapterState::current(&settings, &active, Vec::new(), true)
+        assert!(AdapterState::current(&settings, &active, &manager, true)
             .validate(&settings, None)
             .is_err());
     }
@@ -1534,8 +1564,9 @@ mod adapter_state_tests {
     fn recovery_state_rejects_unknown_json_fields() {
         let settings = settings();
         let active = active();
+        let manager = RouteManager::default();
         let mut value =
-            serde_json::to_value(AdapterState::current(&settings, &active, Vec::new(), true))
+            serde_json::to_value(AdapterState::current(&settings, &active, &manager, true))
                 .unwrap();
         value
             .as_object_mut()
@@ -1574,7 +1605,7 @@ mod adapter_state_tests {
     }
 
     #[test]
-    fn successful_route_cleanup_forgets_only_the_deleted_route() {
+    fn completed_route_cleanup_forgets_only_the_deleted_route() {
         let gateway = RouteState {
             destination: "10.42.0.1".into(),
             prefix: 32,
@@ -1583,11 +1614,14 @@ mod adapter_state_tests {
             destination: "10.42.0.3".into(),
             prefix: 32,
         };
-        let mut routes = vec![gateway.clone(), peer.clone()];
+        let mut manager = RouteManager::restore(
+            vec![gateway.clone(), peer.clone()],
+            vec![gateway.clone(), peer.clone()],
+            vec![RouteOperation::Remove(gateway.clone())],
+        );
+        manager.complete(&RouteOperation::Remove(gateway));
 
-        forget_route(&mut routes, &gateway);
-
-        assert_eq!(routes, vec![peer]);
+        assert_eq!(manager.owned(), &[peer]);
     }
 
     #[test]
@@ -1612,29 +1646,36 @@ mod adapter_state_tests {
     }
 
     #[test]
-    fn route_changes_revoke_stale_routes_before_adding_new_routes() {
-        let gateway = RouteState {
-            destination: "10.42.0.1".into(),
-            prefix: 32,
-        };
-        let stale = RouteState {
-            destination: "10.42.0.3".into(),
-            prefix: 32,
-        };
-        let added = RouteState {
-            destination: "10.42.0.4".into(),
-            prefix: 32,
-        };
+    fn version_one_state_restores_routes_as_desired_and_owned() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = settings();
+        settings.data_dir = root.path().to_path_buf();
+        let active = active();
+        let hosts = root.path().join("generations/gen-safe/hosts");
+        std::fs::create_dir_all(&hosts).unwrap();
+        std::fs::write(
+            hosts.join("server_master"),
+            include_str!("../tests/fixtures/backend-config/server_master"),
+        )
+        .unwrap();
+        let legacy = serde_json::json!({
+            "version": 1,
+            "interface": "tinc0",
+            "address": "10.42.0.2",
+            "prefix": 32,
+            "generation": "gen-safe",
+            "profile": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "routes": [
+                {"destination": "10.254.0.1", "prefix": 32},
+                {"destination": "10.42.0.3", "prefix": 32}
+            ]
+        });
+        let state: AdapterState = serde_json::from_value(legacy).unwrap();
 
-        let changes = route_changes(
-            &[gateway.clone(), stale.clone()],
-            &[gateway.clone(), added.clone()],
-        );
-
-        assert_eq!(
-            changes,
-            vec![RouteChange::Remove(stale), RouteChange::Add(added)]
-        );
+        state.validate(&settings, Some(&active)).unwrap();
+        let restored = state.route_manager();
+        assert_eq!(restored.desired(), restored.owned());
+        assert!(restored.pending().is_empty());
     }
 
     #[test]
