@@ -3,6 +3,12 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use vpn_core::api::Session;
 const UPLOAD: &str = "Subnet = 10.42.0.2/32\n\n-----BEGIN RSA PUBLIC KEY-----\nfixture\n-----END RSA PUBLIC KEY-----\n";
+const CONTRACT_LOGIN: &str = include_str!("fixtures/server-contract/login-success.json");
+const CONTRACT_KEEPALIVE: &str = include_str!("fixtures/server-contract/keepalive-success.json");
+const CONTRACT_TOKEN_INVALID: &str = include_str!("fixtures/server-contract/token-invalid.json");
+const CONTRACT_NODE_REVOKED: &str = include_str!("fixtures/server-contract/node-revoked.json");
+const CONTRACT_ROUTE_UNAVAILABLE: &str =
+    include_str!("fixtures/server-contract/route-unavailable.json");
 async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -267,6 +273,104 @@ async fn keepalive_maps_route_snapshot_unavailable_as_retryable() {
     assert_eq!(error.code, "route_snapshot_unavailable");
     assert!(error.retryable);
     assert!(!error.message.contains("secret"));
+    task.abort();
+}
+
+#[tokio::test]
+async fn parses_the_formal_server_login_and_keepalive_fixtures() {
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|| async { ([("content-type", "application/json")], CONTRACT_LOGIN) }),
+        )
+        .route(
+            "/api/tinc/client/keepalive",
+            post(|| async { ([("content-type", "application/json")], CONTRACT_KEEPALIVE) }),
+        );
+    let (url, task) = serve(app).await;
+
+    let session = Session::login(&url, Some("TL-7K9M-2Q4F"), None, "password", true)
+        .await
+        .unwrap();
+    assert_eq!(session.identity.sid, "client_a");
+    assert_eq!(session.identity.node_id, Some(5));
+    assert_eq!(session.identity.network_id, Some(8));
+    assert_eq!(session.allowed_routes().len(), 2);
+    assert_eq!(
+        session.route_snapshot().unwrap().revision(),
+        Some("routes-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+
+    let refreshed = session.keepalive().await.unwrap().unwrap();
+    let after = std::time::Instant::now();
+    let remaining = refreshed.lease_deadline().unwrap().duration_since(after);
+    assert!(remaining >= std::time::Duration::from_secs(119));
+    assert!(remaining <= std::time::Duration::from_secs(120));
+    assert_eq!(refreshed.routes().len(), 2);
+    task.abort();
+}
+
+#[tokio::test]
+async fn maps_formal_keepalive_http_status_and_business_code_pairs() {
+    for (status, body, code, retryable) in [
+        (
+            StatusCode::UNAUTHORIZED,
+            CONTRACT_TOKEN_INVALID,
+            "auth_expired",
+            false,
+        ),
+        (
+            StatusCode::GONE,
+            CONTRACT_NODE_REVOKED,
+            "node_revoked",
+            false,
+        ),
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            CONTRACT_ROUTE_UNAVAILABLE,
+            "route_snapshot_unavailable",
+            true,
+        ),
+    ] {
+        let app = Router::new()
+            .route(
+                "/api/tinc/client/login",
+                post(|| async { ([("content-type", "application/json")], CONTRACT_LOGIN) }),
+            )
+            .route(
+                "/api/tinc/client/keepalive",
+                post(move || async move { (status, [("content-type", "application/json")], body) }),
+            );
+        let (url, task) = serve(app).await;
+        let session = Session::login(&url, Some("TL-7K9M-2Q4F"), None, "password", true)
+            .await
+            .unwrap();
+
+        let error = session.keepalive().await.unwrap_err();
+
+        assert_eq!(error.code, code);
+        assert_eq!(error.retryable, retryable);
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn legacy_keepalive_without_a_snapshot_is_explicitly_empty() {
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|| async { ([("content-type", "application/json")], CONTRACT_LOGIN) }),
+        )
+        .route(
+            "/api/tinc/client/keepalive",
+            post(|| async { Json(json!({"status":"success","msg":"心跳成功"})) }),
+        );
+    let (url, task) = serve(app).await;
+    let session = Session::login(&url, Some("TL-7K9M-2Q4F"), None, "password", true)
+        .await
+        .unwrap();
+
+    assert!(session.keepalive().await.unwrap().is_none());
     task.abort();
 }
 

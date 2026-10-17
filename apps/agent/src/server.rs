@@ -60,15 +60,12 @@ pub async fn serve(
             } else {
                 None
             };
-            let Some((session, session_epoch)) = session else {
+            let Some((session, ticket)) = session else {
                 continue;
             };
             let keepalive = session.keepalive().await;
             let mut engine = tick_engine.lock().await;
-            if let Err(error) = engine
-                .finish_background_keepalive(session_epoch, keepalive)
-                .await
-            {
+            if let Err(error) = engine.finish_background_keepalive(ticket, keepalive).await {
                 engine.fail(error).await;
             }
         }

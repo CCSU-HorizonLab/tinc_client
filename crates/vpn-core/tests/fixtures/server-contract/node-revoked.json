@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "CLIENT_NODE_REVOKED",
+  "msg": "节点已被撤销"
+}

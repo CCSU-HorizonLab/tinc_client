@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "CLIENT_ROUTE_SNAPSHOT_UNAVAILABLE",
+  "msg": "授权路由暂时不可用"
+}

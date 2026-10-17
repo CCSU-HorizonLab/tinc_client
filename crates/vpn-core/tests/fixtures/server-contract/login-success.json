@@ -1,0 +1,14 @@
+{
+  "status": 1,
+  "sid": "client_a",
+  "access_code": "TL-7K9M-2Q4F",
+  "token": "fixture-token",
+  "net_name": "office",
+  "network_id": 8,
+  "node_id": 5,
+  "msg": "登录成功",
+  "node_ip": "10.0.11.211",
+  "allowed_routes": ["10.0.11.1/32", "10.0.11.212/32"],
+  "route_revision": "routes-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "route_lease_seconds": 120
+}

@@ -42,10 +42,19 @@ fn background_keepalive_due(
     child_running: bool,
     process_running: bool,
     last_keepalive: Option<tokio::time::Instant>,
+    request_in_flight: bool,
 ) -> bool {
     child_running
         && process_running
+        && !request_in_flight
         && last_keepalive.is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepaliveTicket {
+    session_epoch: u64,
+    vpn_epoch: u64,
+    request_id: u64,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -240,13 +249,33 @@ fn running_route_lease_expired(
     child_exists && process_running && deadline.is_none_or(|deadline| now >= deadline)
 }
 
+fn route_lease_is_valid(deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    deadline.is_some_and(|deadline| now < deadline)
+}
+
 fn route_snapshot_needs_reconcile(
     current_revision: Option<&str>,
     current_routes: &[RouteState],
     next_revision: &str,
     next_routes: &[RouteState],
+) -> Result<bool> {
+    if current_revision == Some(next_revision) && current_routes != next_routes {
+        return Err(Error::protocol(
+            "服务端在相同 route_revision 下返回了不同路由内容，已拒绝更新",
+        ));
+    }
+    Ok(current_revision != Some(next_revision) || current_routes != next_routes)
+}
+
+fn keepalive_ticket_is_current(
+    ticket: KeepaliveTicket,
+    session_epoch: u64,
+    vpn_epoch: u64,
+    active_request: Option<u64>,
 ) -> bool {
-    current_revision != Some(next_revision) || current_routes != next_routes
+    ticket.session_epoch == session_epoch
+        && ticket.vpn_epoch == vpn_epoch
+        && active_request == Some(ticket.request_id)
 }
 
 fn read_adapter_state(
@@ -270,6 +299,9 @@ pub struct Engine {
     settings: Settings,
     session: Option<Session>,
     session_epoch: u64,
+    vpn_epoch: u64,
+    next_keepalive_request_id: u64,
+    active_keepalive_request: Option<u64>,
     active: Option<Active>,
     child: Option<Child>,
     adapter_address_configured: bool,
@@ -326,6 +358,9 @@ impl Engine {
             settings,
             session: None,
             session_epoch: 0,
+            vpn_epoch: 0,
+            next_keepalive_request_id: 0,
+            active_keepalive_request: None,
             active,
             child: None,
             adapter_address_configured: adapter_state.is_some(),
@@ -380,6 +415,7 @@ impl Engine {
             }
             self.session = None;
             self.session_epoch = self.session_epoch.wrapping_add(1);
+            self.active_keepalive_request = None;
             self.status.write().await.session = None;
         } else if error.code == "node_revoked" {
             // Revocation is a node-lifecycle event, not merely a failed HTTP request.
@@ -395,6 +431,7 @@ impl Engine {
             }
             self.session = None;
             self.session_epoch = self.session_epoch.wrapping_add(1);
+            self.active_keepalive_request = None;
             let mut status = self.status.write().await;
             status.session = None;
             status.phase = Phase::Failed;
@@ -472,6 +509,7 @@ impl Engine {
                 }
                 self.session = Some(session);
                 self.session_epoch = self.session_epoch.wrapping_add(1);
+                self.active_keepalive_request = None;
                 self.log("登录成功，已取得后台分配的网络与节点地址").await;
             }
             Request::Configure => self.configure().await?,
@@ -484,6 +522,7 @@ impl Engine {
                 }
                 self.session = None;
                 self.session_epoch = self.session_epoch.wrapping_add(1);
+                self.active_keepalive_request = None;
                 self.status.write().await.session = None;
                 self.last_keepalive = None;
                 self.log("VPN 已停止，本地会话已清除；服务端未提供撤销接口")
@@ -688,6 +727,8 @@ impl Engine {
         if let Some(child) = &mut self.child {
             if let Some(code) = child.try_wait().map_err(Error::io)? {
                 self.child = None;
+                self.vpn_epoch = self.vpn_epoch.wrapping_add(1);
+                self.active_keepalive_request = None;
                 let mut s = self.status.write().await;
                 s.process_running = false;
                 s.connection = "unknown".into();
@@ -730,13 +771,27 @@ impl Engine {
 
     /// Starts a periodic keepalive without retaining the Agent's Engine lock
     /// while the HTTP request is in flight.
-    pub async fn begin_background_keepalive(&mut self) -> Option<(Session, u64)> {
+    pub async fn begin_background_keepalive(&mut self) -> Option<(Session, KeepaliveTicket)> {
         let process_running = self.status.read().await.process_running;
-        if background_keepalive_due(self.child.is_some(), process_running, self.last_keepalive) {
+        if background_keepalive_due(
+            self.child.is_some(),
+            process_running,
+            self.last_keepalive,
+            self.active_keepalive_request.is_some(),
+        ) {
+            let session = self.session.clone()?;
             self.last_keepalive = Some(tokio::time::Instant::now());
-            self.session
-                .clone()
-                .map(|session| (session, self.session_epoch))
+            self.next_keepalive_request_id = self.next_keepalive_request_id.wrapping_add(1);
+            let request_id = self.next_keepalive_request_id;
+            self.active_keepalive_request = Some(request_id);
+            Some((
+                session,
+                KeepaliveTicket {
+                    session_epoch: self.session_epoch,
+                    vpn_epoch: self.vpn_epoch,
+                    request_id,
+                },
+            ))
         } else {
             None
         }
@@ -744,12 +799,18 @@ impl Engine {
 
     pub async fn finish_background_keepalive(
         &mut self,
-        session_epoch: u64,
+        ticket: KeepaliveTicket,
         keepalive: Result<Option<RouteSnapshot>>,
     ) -> Result<()> {
-        if session_epoch != self.session_epoch {
+        if !keepalive_ticket_is_current(
+            ticket,
+            self.session_epoch,
+            self.vpn_epoch,
+            self.active_keepalive_request,
+        ) {
             return Ok(());
         }
+        self.active_keepalive_request = None;
         if let Err(error) = &keepalive {
             if error.code == "node_revoked" || error.code == "auth_expired" {
                 return Err(error.clone());
@@ -767,14 +828,14 @@ impl Engine {
             // until its original deadline, then fail closed in poll().
             return self.ensure_route_lease_valid();
         };
+        // Once the previous local lease has expired, even a late successful
+        // response from a request started earlier cannot resurrect that VPN.
+        self.ensure_route_lease_valid()?;
         self.apply_route_snapshot(&snapshot).await
     }
 
     fn ensure_route_lease_valid(&self) -> Result<()> {
-        if self
-            .route_lease_deadline
-            .is_some_and(|deadline| std::time::Instant::now() < deadline)
-        {
+        if route_lease_is_valid(self.route_lease_deadline, std::time::Instant::now()) {
             Ok(())
         } else {
             Err(Error::new(
@@ -799,13 +860,14 @@ impl Engine {
             ));
         }
         let desired = managed_routes(gateway, snapshot.routes())?;
-        self.route_lease_deadline = Some(deadline);
-        if route_snapshot_needs_reconcile(
+        let needs_reconcile = route_snapshot_needs_reconcile(
             self.route_revision.as_deref(),
             self.route_manager.desired(),
             revision,
             &desired,
-        ) {
+        )?;
+        self.route_lease_deadline = Some(deadline);
+        if needs_reconcile {
             self.route_revision = Some(revision.to_owned());
             self.reconcile_routes(&desired).await?;
             let ip = self
@@ -830,6 +892,8 @@ impl Engine {
                 true,
             ));
         }
+        self.vpn_epoch = self.vpn_epoch.wrapping_add(1);
+        self.active_keepalive_request = None;
         let active = self
             .active
             .clone()
@@ -1473,6 +1537,8 @@ impl Engine {
         }
     }
     pub async fn stop(&mut self) -> Result<()> {
+        self.vpn_epoch = self.vpn_epoch.wrapping_add(1);
+        self.active_keepalive_request = None;
         if let Some(child) = &mut self.child {
             tokio::time::timeout(Duration::from_secs(10), child.kill())
                 .await
@@ -2011,6 +2077,17 @@ mod route_lifecycle_tests {
     }
 
     #[test]
+    fn lease_is_invalid_at_the_deadline_and_valid_until_just_before_it() {
+        let now = std::time::Instant::now();
+        assert!(!route_lease_is_valid(None, now));
+        assert!(!route_lease_is_valid(Some(now), now));
+        assert!(route_lease_is_valid(
+            Some(now + Duration::from_nanos(1)),
+            now
+        ));
+    }
+
+    #[test]
     fn unchanged_revision_and_routes_skip_reconciliation() {
         let current = vec![route(1), route(212)];
         assert!(!route_snapshot_needs_reconcile(
@@ -2018,19 +2095,41 @@ mod route_lifecycle_tests {
             &current,
             "routes-fixture",
             &current,
-        ));
+        )
+        .unwrap());
         assert!(route_snapshot_needs_reconcile(
             Some("routes-fixture"),
             &current,
             "routes-next",
             &current,
-        ));
-        assert!(route_snapshot_needs_reconcile(
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn same_revision_with_different_routes_is_rejected() {
+        let current = vec![route(1), route(212)];
+        let error = route_snapshot_needs_reconcile(
             Some("routes-fixture"),
             &current,
             "routes-fixture",
             &[route(1), route(211)],
-        ));
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "protocol");
+    }
+
+    #[test]
+    fn stale_or_out_of_order_keepalive_ticket_is_never_current() {
+        let current = KeepaliveTicket {
+            session_epoch: 4,
+            vpn_epoch: 7,
+            request_id: 10,
+        };
+        assert!(keepalive_ticket_is_current(current, 4, 7, Some(10)));
+        assert!(!keepalive_ticket_is_current(current, 5, 7, Some(10)));
+        assert!(!keepalive_ticket_is_current(current, 4, 8, Some(10)));
+        assert!(!keepalive_ticket_is_current(current, 4, 7, Some(11)));
     }
 }
 
@@ -2240,12 +2339,14 @@ mod adapter_state_tests {
 
     #[test]
     fn background_keepalive_waits_for_fully_running_state() {
-        assert!(!background_keepalive_due(true, false, None));
-        assert!(background_keepalive_due(true, true, None));
+        assert!(!background_keepalive_due(true, false, None, false));
+        assert!(background_keepalive_due(true, true, None, false));
+        assert!(!background_keepalive_due(true, true, None, true));
         assert!(!background_keepalive_due(
             true,
             true,
-            Some(tokio::time::Instant::now())
+            Some(tokio::time::Instant::now()),
+            false,
         ));
     }
 }

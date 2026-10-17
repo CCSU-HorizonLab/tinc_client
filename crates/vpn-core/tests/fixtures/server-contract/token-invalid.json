@@ -1,0 +1,5 @@
+{
+  "status": "error",
+  "code": "CLIENT_TOKEN_INVALID",
+  "msg": "客户端会话无效或已过期"
+}

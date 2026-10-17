@@ -61,8 +61,8 @@ const backend=createServer(async(req,res)=>{
   const chunks=[];for await(const c of req)chunks.push(c);const body=JSON.parse(Buffer.concat(chunks));
   if(req.url==='/api/tinc/client/login'){
    if(body.password!=='fixture-password'){res.setHeader('Content-Type','application/json');return res.end(JSON.stringify({status:0,msg:'rejected'}));}
-   if(body.accessCode){assert.deepEqual(Object.keys(body).sort(),['accessCode','password']);assert.equal(body.accessCode,'TL-7K9M-2Q4F');return res.end(JSON.stringify({status:1,access_code:'TL-7K9M-2Q4F',sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20,allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'network-20-fixture',route_lease_seconds:120}));}
-   assert.deepEqual(Object.keys(body).sort(),['password','sid']);return res.end(JSON.stringify({status:1,sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20,allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'network-20-fixture',route_lease_seconds:120}));
+   if(body.accessCode){assert.deepEqual(Object.keys(body).sort(),['accessCode','password']);assert.equal(body.accessCode,'TL-7K9M-2Q4F');return res.end(JSON.stringify({status:1,access_code:'TL-7K9M-2Q4F',sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20,allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'routes-fixture',route_lease_seconds:120}));}
+   assert.deepEqual(Object.keys(body).sort(),['password','sid']);return res.end(JSON.stringify({status:1,sid:'client_a',token:'fixture-token',net_name:'office',node_ip:'10.42.0.2',node_id:101,network_id:20,allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'routes-fixture',route_lease_seconds:120}));
   }
   if(req.url==='/api/tinc/client/config/download'){
    assert.deepEqual(body,{sid:'client_a',token:'fixture-token'});
@@ -78,7 +78,8 @@ const backend=createServer(async(req,res)=>{
   if(req.url==='/api/tinc/client/keepalive'){
    assert.deepEqual(body,{sid:'client_a',token:'fixture-token'});res.setHeader('Content-Type','application/json');
    if(mode==='revoked'){res.statusCode=410;return res.end(JSON.stringify({code:'CLIENT_NODE_REVOKED',message:'revoked by fixture'}));}
-   return res.end(JSON.stringify({status:'success',allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'network-20-fixture',route_lease_seconds:120}));
+   if(mode==='legacy-routes'){return res.end(JSON.stringify({status:'success'}));}
+   return res.end(JSON.stringify({status:'success',allowed_routes:['10.42.0.1/32','10.42.0.3/32'],route_revision:'routes-fixture',route_lease_seconds:120}));
   }
   res.statusCode=404;res.end('unexpected endpoint');
  }catch(e){res.statusCode=500;res.end('fixture assertion failed');console.error(e);}
@@ -109,6 +110,7 @@ try{
  mode='unsafe';assert.equal((await rpc({command:'configure'})).kind,'error');assert.equal(await readFile(activePath,'utf8'),active);pass('unsafe archive rejected and previous configuration preserved');
  mode='pause';const pending=rpc({command:'configure'});while(!releaseDownload)await delay(20);
  assert.equal((await ok('get_status')).phase,'configuring');assert.equal((await rpc({command:'configure'})).data.code,'busy');releaseDownload();mode='ok';assert.equal((await pending).kind,'status');pass('duplicate configure rejected while status remains readable');
+ mode='legacy-routes';assert.equal((await rpc({command:'start_vpn'})).data.code,'route_lease_missing');mode='ok';pass('legacy response without a route lease cannot start VPN');
  assert.equal((await rpc({command:'start_vpn'})).data.code,'tinc_missing');pass('missing real Tinc binary is a visible failure');
  mode='expired';assert.equal((await rpc({command:'configure'})).data.code,'auth_expired');assert.equal((await ok('get_status')).session,null);pass('expired session cleared while retained configuration survives');
  const logs=(await rpc({command:'get_recent_logs'})).data;assert(!JSON.stringify(logs).includes('fixture-password'));assert(!JSON.stringify(logs).includes('fixture-token'));assert(!JSON.stringify(logs).includes('PRIVATE KEY'));pass('logs exclude credentials and private keys');
