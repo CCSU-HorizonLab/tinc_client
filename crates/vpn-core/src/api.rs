@@ -1,7 +1,11 @@
 use crate::{identifier, AllowedRoute, Error, Identity, Result};
 use reqwest::{redirect::Policy, Client};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, net::Ipv4Addr, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::Ipv4Addr,
+    time::{Duration, Instant},
+};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -28,12 +32,37 @@ fn has_media_type(value: Option<&str>, expected: &str) -> bool {
 pub struct Session {
     pub identity: Identity,
     pub origin: String,
-    allowed_routes: Vec<AllowedRoute>,
+    route_snapshot: Option<RouteSnapshot>,
     token: Zeroizing<String>,
     client: Client,
 }
 
 const MAX_ALLOWED_ROUTES: usize = 1024;
+const MIN_ROUTE_LEASE_SECONDS: u64 = 30;
+const MAX_ROUTE_LEASE_SECONDS: u64 = 3600;
+
+#[derive(Clone, Debug)]
+pub struct RouteSnapshot {
+    routes: Vec<AllowedRoute>,
+    revision: Option<String>,
+    lease_seconds: Option<u64>,
+    received_at: Instant,
+}
+
+impl RouteSnapshot {
+    pub fn routes(&self) -> &[AllowedRoute] {
+        &self.routes
+    }
+
+    pub fn revision(&self) -> Option<&str> {
+        self.revision.as_deref()
+    }
+
+    pub fn lease_deadline(&self) -> Option<Instant> {
+        self.lease_seconds
+            .map(|seconds| self.received_at + Duration::from_secs(seconds))
+    }
+}
 
 fn parse_allowed_routes(value: &Value, own_ip: Ipv4Addr) -> Result<Option<Vec<AllowedRoute>>> {
     let Some(routes) = value.get("allowed_routes") else {
@@ -77,6 +106,51 @@ fn parse_allowed_routes(value: &Value, own_ip: Ipv4Addr) -> Result<Option<Vec<Al
         });
     }
     Ok(Some(parsed.into_iter().collect()))
+}
+
+fn parse_route_snapshot(value: &Value, own_ip: Ipv4Addr) -> Result<Option<RouteSnapshot>> {
+    let Some(routes) = parse_allowed_routes(value, own_ip)? else {
+        if value.get("route_revision").is_some() || value.get("route_lease_seconds").is_some() {
+            return Err(Error::protocol(
+                "路由快照元数据存在，但 allowed_routes 缺失",
+            ));
+        }
+        return Ok(None);
+    };
+    let revision = value.get("route_revision");
+    let lease = value.get("route_lease_seconds");
+    let (revision, lease_seconds) = match (revision, lease) {
+        (None, None) => (None, None),
+        (Some(revision), Some(lease)) => {
+            let revision = revision
+                .as_str()
+                .filter(|revision| {
+                    !revision.is_empty()
+                        && revision.len() <= 256
+                        && revision.trim() == *revision
+                        && revision.bytes().all(|byte| byte.is_ascii_graphic())
+                })
+                .ok_or_else(|| Error::protocol("route_revision 格式无效"))?;
+            let lease_seconds = lease
+                .as_u64()
+                .filter(|seconds| {
+                    (MIN_ROUTE_LEASE_SECONDS..=MAX_ROUTE_LEASE_SECONDS).contains(seconds)
+                })
+                .ok_or_else(|| Error::protocol("route_lease_seconds 超出客户端安全范围"))?;
+            (Some(revision.to_owned()), Some(lease_seconds))
+        }
+        _ => {
+            return Err(Error::protocol(
+                "route_revision 与 route_lease_seconds 必须同时提供",
+            ));
+        }
+    };
+    Ok(Some(RouteSnapshot {
+        routes,
+        revision,
+        lease_seconds,
+        received_at: Instant::now(),
+    }))
 }
 
 pub fn origin(value: &str, allow_http: bool) -> Result<Url> {
@@ -185,6 +259,11 @@ pub fn map_backend_error(code: &str, fallback_msg: Option<&str>) -> Error {
         "CLIENT_KEEPALIVE_FAILED" => {
             Error::new("keepalive_failed", "心跳服务暂时不可用，可以稍后重试", true)
         }
+        "CLIENT_ROUTE_SNAPSHOT_UNAVAILABLE" => Error::new(
+            "route_snapshot_unavailable",
+            "授权路由快照暂时不可用，可以稍后重试",
+            true,
+        ),
         "GATEWAY_HOST_UNAVAILABLE" | "GATEWAY_UNAVAILABLE" => Error::new(
             "gateway_unavailable",
             "网关配置暂时不可用，请联系管理员检查网关",
@@ -396,7 +475,7 @@ impl Session {
         let node_address = node_ip
             .parse::<Ipv4Addr>()
             .map_err(|_| Error::protocol("后台分配的 node_ip 必须是 IPv4 地址"))?;
-        let allowed_routes = parse_allowed_routes(&v, node_address)?.unwrap_or_default();
+        let route_snapshot = parse_route_snapshot(&v, node_address)?;
         let identity = Identity {
             sid: returned_sid,
             net_name: returned_net_name,
@@ -408,13 +487,19 @@ impl Session {
         Ok(Self {
             identity,
             origin,
-            allowed_routes,
+            route_snapshot,
             token: Zeroizing::new(field("token")?),
             client,
         })
     }
     pub fn allowed_routes(&self) -> &[AllowedRoute] {
-        &self.allowed_routes
+        self.route_snapshot
+            .as_ref()
+            .map(RouteSnapshot::routes)
+            .unwrap_or_default()
+    }
+    pub fn route_snapshot(&self) -> Option<&RouteSnapshot> {
+        self.route_snapshot.as_ref()
     }
     pub async fn download(&self) -> Result<Vec<u8>> {
         let response = post(
@@ -461,7 +546,7 @@ impl Session {
         String::from_utf8(response.body)
             .map_err(|_| Error::protocol("公钥上传响应不是 UTF-8 主机配置"))
     }
-    pub async fn keepalive(&self) -> Result<Option<Vec<AllowedRoute>>> {
+    pub async fn keepalive(&self) -> Result<Option<RouteSnapshot>> {
         let response = post(
             &self.client,
             &self.origin,
@@ -483,6 +568,6 @@ impl Session {
             .node_ip
             .parse::<Ipv4Addr>()
             .map_err(|_| Error::protocol("活动节点地址无效"))?;
-        parse_allowed_routes(&value, own_ip)
+        parse_route_snapshot(&value, own_ip)
     }
 }

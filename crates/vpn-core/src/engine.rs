@@ -1,6 +1,6 @@
 use crate::route_manager::{validate_routes, RouteManager, RouteOperation, RouteState};
 use crate::{
-    api::Session,
+    api::{RouteSnapshot, Session},
     config::{self, Active},
     keys, *,
 };
@@ -62,7 +62,7 @@ struct AdapterState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     network_id: Option<u64>,
     #[serde(default)]
-    route_revision: Option<u64>,
+    route_revision: Option<String>,
     #[serde(default)]
     desired_routes: Vec<RouteState>,
     #[serde(default, alias = "routes")]
@@ -78,6 +78,7 @@ impl AdapterState {
         settings: &Settings,
         active: &Active,
         route_manager: &RouteManager,
+        route_revision: Option<&str>,
         _link_touched: bool,
     ) -> Self {
         Self {
@@ -89,10 +90,7 @@ impl AdapterState {
             profile: active.profile.clone(),
             node_id: active.identity.node_id,
             network_id: active.identity.network_id,
-            // The current server contract has no route revision.  Keep the
-            // field explicit and empty so a future compatible contract can
-            // populate it without changing ownership semantics.
-            route_revision: None,
+            route_revision: route_revision.map(str::to_owned),
             desired_routes: route_manager.desired().to_vec(),
             owned_routes: route_manager.owned().to_vec(),
             pending_operations: route_manager.pending().to_vec(),
@@ -114,8 +112,14 @@ impl AdapterState {
             && self.generation == active.generation
             && self.profile == active.profile
             && stable_identity_matches;
+        let revision_valid = self.route_revision.as_ref().is_none_or(|revision| {
+            !revision.is_empty()
+                && revision.len() <= 256
+                && revision.trim() == revision
+                && revision.bytes().all(|byte| byte.is_ascii_graphic())
+        });
         let address = self.address.parse::<std::net::Ipv4Addr>();
-        if !matches || address.is_err() {
+        if !matches || !revision_valid || address.is_err() {
             return Err(adapter_state_error("记录与当前管理员设置或有效配置不一致"));
         }
         let address = address.unwrap();
@@ -219,6 +223,14 @@ fn adapter_state_error(reason: &str) -> Error {
     )
 }
 
+fn route_lease_missing() -> Error {
+    Error::new(
+        "route_lease_missing",
+        "服务端未返回完整的路由版本与授权租约，已拒绝启动或继续 VPN",
+        false,
+    )
+}
+
 fn read_adapter_state(
     root: &Path,
     settings: &Settings,
@@ -248,6 +260,8 @@ pub struct Engine {
     last_probe: Option<tokio::time::Instant>,
     probe_started_at: Option<tokio::time::Instant>,
     last_keepalive: Option<tokio::time::Instant>,
+    route_revision: Option<String>,
+    route_lease_deadline: Option<std::time::Instant>,
     #[cfg(unix)]
     adapter_link_touched: bool,
     #[cfg(windows)]
@@ -305,6 +319,10 @@ impl Engine {
             last_probe: None,
             probe_started_at: None,
             last_keepalive: None,
+            route_revision: adapter_state
+                .as_ref()
+                .and_then(|state| state.route_revision.clone()),
+            route_lease_deadline: None,
             #[cfg(unix)]
             adapter_link_touched: adapter_state
                 .as_ref()
@@ -363,6 +381,12 @@ impl Engine {
             status.session = None;
             status.phase = Phase::Failed;
             status.stage = error.message.clone();
+        } else if error.code == "route_lease_expired"
+            && (self.child.is_some() || self.adapter_cleanup_pending())
+        {
+            if let Err(cleanup_error) = self.stop().await {
+                self.log(&cleanup_error.message).await;
+            }
         }
         let mut status = self.status.write().await;
         if !status.process_running {
@@ -631,6 +655,18 @@ impl Engine {
         Ok(())
     }
     pub async fn poll(&mut self) -> Result<()> {
+        if self.child.is_some()
+            && self.status.read().await.process_running
+            && self
+                .route_lease_deadline
+                .is_none_or(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return Err(Error::new(
+                "route_lease_expired",
+                "路由授权租约已到期，VPN 将停止并清理自有路由",
+                false,
+            ));
+        }
         if let Some(child) = &mut self.child {
             if let Some(code) = child.try_wait().map_err(Error::io)? {
                 self.child = None;
@@ -659,6 +695,8 @@ impl Engine {
                 self.probe_target = None;
                 self.last_probe = None;
                 self.probe_started_at = None;
+                self.route_revision = None;
+                self.route_lease_deadline = None;
             }
         }
         if self.child.is_some()
@@ -689,7 +727,7 @@ impl Engine {
     pub async fn finish_background_keepalive(
         &mut self,
         session_epoch: u64,
-        keepalive: Result<Option<Vec<AllowedRoute>>>,
+        keepalive: Result<Option<RouteSnapshot>>,
     ) -> Result<()> {
         if session_epoch != self.session_epoch {
             return Ok(());
@@ -698,19 +736,64 @@ impl Engine {
             if error.code == "node_revoked" || error.code == "auth_expired" {
                 return Err(error.clone());
             }
-            // A transient request failure does not revoke an otherwise valid
-            // local session. The next interval retries it.
-            return Ok(());
+            // A transient or malformed response does not revoke an otherwise
+            // valid lease. It becomes fail-closed only at the saved deadline.
+            return self.ensure_route_lease_valid();
         }
         if self.child.is_none() || !self.status.read().await.process_running {
             return Ok(());
         }
-        if let Ok(Some(allowed_routes)) = keepalive {
-            let gateway = self
-                .probe_target
-                .ok_or_else(|| Error::new("route_sync", "VPN 运行状态缺少网关路由目标", true))?;
-            let desired = managed_routes(gateway, &allowed_routes)?;
+        let Some(snapshot) = keepalive.ok().flatten() else {
+            // A successful but legacy/malformed heartbeat must not erase an
+            // existing authorization lease. Keep using the last snapshot only
+            // until its original deadline, then fail closed in poll().
+            return self.ensure_route_lease_valid();
+        };
+        self.apply_route_snapshot(&snapshot).await
+    }
+
+    fn ensure_route_lease_valid(&self) -> Result<()> {
+        if self
+            .route_lease_deadline
+            .is_some_and(|deadline| std::time::Instant::now() < deadline)
+        {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "route_lease_expired",
+                "无法续期路由授权，租约已到期；VPN 将停止并清理自有路由",
+                false,
+            ))
+        }
+    }
+
+    async fn apply_route_snapshot(&mut self, snapshot: &RouteSnapshot) -> Result<()> {
+        let gateway = self
+            .probe_target
+            .ok_or_else(|| Error::new("route_sync", "VPN 运行状态缺少网关路由目标", true))?;
+        let revision = snapshot.revision().ok_or_else(route_lease_missing)?;
+        let deadline = snapshot.lease_deadline().ok_or_else(route_lease_missing)?;
+        if deadline <= std::time::Instant::now() {
+            return Err(Error::new(
+                "route_lease_expired",
+                "服务端返回的路由授权租约已到期",
+                false,
+            ));
+        }
+        let desired = managed_routes(gateway, snapshot.routes())?;
+        let revision_changed = self.route_revision.as_deref() != Some(revision);
+        self.route_lease_deadline = Some(deadline);
+        if revision_changed || self.route_manager.desired() != desired {
+            self.route_revision = Some(revision.to_owned());
             self.reconcile_routes(&desired).await?;
+            let ip = self
+                .active
+                .as_ref()
+                .ok_or_else(|| Error::new("route_sync", "有效配置不存在，无法保存路由版本", false))?
+                .identity
+                .node_ip
+                .clone();
+            self.write_adapter_state(&ip)?;
         }
         Ok(())
     }
@@ -756,7 +839,21 @@ impl Engine {
                 false,
             ));
         }
-        let refreshed_routes = session.keepalive().await?;
+        let refreshed_snapshot = session.keepalive().await?.ok_or_else(route_lease_missing)?;
+        let route_revision = refreshed_snapshot
+            .revision()
+            .ok_or_else(route_lease_missing)?
+            .to_owned();
+        let route_lease_deadline = refreshed_snapshot
+            .lease_deadline()
+            .ok_or_else(route_lease_missing)?;
+        if route_lease_deadline <= std::time::Instant::now() {
+            return Err(Error::new(
+                "route_lease_expired",
+                "服务端返回的路由授权租约已到期",
+                false,
+            ));
+        }
         if !self.settings.tinc_binary.is_file() {
             return Err(Error::new(
                 "tinc_missing",
@@ -765,12 +862,7 @@ impl Engine {
             ));
         }
         let probe_target = config::server_probe_target(&self.settings.data_dir, &active)?;
-        let routes = managed_routes(
-            probe_target,
-            refreshed_routes
-                .as_deref()
-                .unwrap_or_else(|| session.allowed_routes()),
-        )?;
+        let routes = managed_routes(probe_target, refreshed_snapshot.routes())?;
         let mut version = Command::new(&self.settings.tinc_binary);
         version.arg("--version").kill_on_drop(true);
         hide(&mut version);
@@ -825,6 +917,8 @@ impl Engine {
                 true,
             ));
         }
+        self.route_revision = Some(route_revision);
+        self.route_lease_deadline = Some(route_lease_deadline);
         if let Err(error) = self.set_adapter(&active.identity.node_ip, &routes).await {
             self.stop().await?;
             return Err(error);
@@ -1121,16 +1215,22 @@ impl Engine {
         if active.identity.node_ip != ip {
             return Err(adapter_state_error("写入地址与有效配置不一致"));
         }
-        let state = AdapterState::current(&self.settings, active, &self.route_manager, {
-            #[cfg(unix)]
+        let state = AdapterState::current(
+            &self.settings,
+            active,
+            &self.route_manager,
+            self.route_revision.as_deref(),
             {
-                self.adapter_link_touched
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        });
+                #[cfg(unix)]
+                {
+                    self.adapter_link_touched
+                }
+                #[cfg(not(unix))]
+                {
+                    false
+                }
+            },
+        );
         keys::atomic_write(
             &self.settings.data_dir.join(ADAPTER_STATE_FILE),
             &serde_json::to_vec(&state).map_err(|_| adapter_state_error("JSON 编码失败"))?,
@@ -1254,6 +1354,8 @@ impl Engine {
         self.probe_target = None;
         self.last_probe = None;
         self.probe_started_at = None;
+        self.route_revision = None;
+        self.route_lease_deadline = None;
         self.stage(
             if self.active.is_some() {
                 Phase::Stopped
@@ -1660,7 +1762,7 @@ mod adapter_state_tests {
         let settings = settings();
         let active = active();
         let manager = RouteManager::default();
-        let mut state = AdapterState::current(&settings, &active, &manager, true);
+        let mut state = AdapterState::current(&settings, &active, &manager, None, true);
         state.validate(&settings, Some(&active)).unwrap();
 
         state.address = "10.42.0.3".into();
@@ -1668,9 +1770,11 @@ mod adapter_state_tests {
             state.validate(&settings, Some(&active)).unwrap_err().code,
             "adapter_state_invalid"
         );
-        assert!(AdapterState::current(&settings, &active, &manager, true)
-            .validate(&settings, None)
-            .is_err());
+        assert!(
+            AdapterState::current(&settings, &active, &manager, None, true)
+                .validate(&settings, None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1678,9 +1782,10 @@ mod adapter_state_tests {
         let settings = settings();
         let active = active();
         let manager = RouteManager::default();
-        let mut value =
-            serde_json::to_value(AdapterState::current(&settings, &active, &manager, true))
-                .unwrap();
+        let mut value = serde_json::to_value(AdapterState::current(
+            &settings, &active, &manager, None, true,
+        ))
+        .unwrap();
         value
             .as_object_mut()
             .unwrap()
@@ -1704,8 +1809,14 @@ mod adapter_state_tests {
             vec![RouteOperation::Add(gateway)],
         );
 
-        let value = serde_json::to_value(AdapterState::current(&settings, &active, &manager, true))
-            .unwrap();
+        let value = serde_json::to_value(AdapterState::current(
+            &settings,
+            &active,
+            &manager,
+            Some("network-11-fixture"),
+            true,
+        ))
+        .unwrap();
 
         assert_eq!(value["version"], 2);
         assert_eq!(value["node_id"], 211);
@@ -1713,7 +1824,7 @@ mod adapter_state_tests {
         assert!(value.get("desired_routes").is_some());
         assert!(value.get("owned_routes").is_some());
         assert!(value.get("pending_operations").is_some());
-        assert!(value.get("route_revision").is_some());
+        assert_eq!(value["route_revision"], "network-11-fixture");
         assert!(value.get("routes").is_none());
     }
 

@@ -237,6 +237,40 @@ async fn keepalive_maps_backend_failure_as_retryable() {
 }
 
 #[tokio::test]
+async fn keepalive_maps_route_snapshot_unavailable_as_retryable() {
+    let app = Router::new()
+        .route(
+            "/api/tinc/client/login",
+            post(|| async {
+                Json(json!({"status":1,"sid":"client_a","token":"opaque","net_name":"office","node_ip":"10.42.0.2"}))
+            }),
+        )
+        .route(
+            "/api/tinc/client/keepalive",
+            post(|| async {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "code": "CLIENT_ROUTE_SNAPSHOT_UNAVAILABLE",
+                        "msg": "token=secret"
+                    })),
+                )
+            }),
+        );
+    let (url, task) = serve(app).await;
+    let session = Session::login(&url, None, Some("client_a"), "password", true)
+        .await
+        .unwrap();
+
+    let error = session.keepalive().await.unwrap_err();
+
+    assert_eq!(error.code, "route_snapshot_unavailable");
+    assert!(error.retryable);
+    assert!(!error.message.contains("secret"));
+    task.abort();
+}
+
+#[tokio::test]
 async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
     let app = Router::new()
         .route(
@@ -248,7 +282,9 @@ async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
                     "token": "opaque",
                     "net_name": "office",
                     "node_ip": "10.42.0.2",
-                    "allowed_routes": ["10.42.0.4/32", "10.42.0.3/32", "10.42.0.3/32"]
+                    "allowed_routes": ["10.42.0.4/32", "10.42.0.3/32", "10.42.0.3/32"],
+                    "route_revision": "network-20-login",
+                    "route_lease_seconds": 120
                 }))
             }),
         )
@@ -257,7 +293,9 @@ async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
             post(|| async {
                 Json(json!({
                     "status": "success",
-                    "allowed_routes": ["10.42.0.5/32"]
+                    "allowed_routes": ["10.42.0.5/32"],
+                    "route_revision": "network-20-keepalive",
+                    "route_lease_seconds": 120
                 }))
             }),
         );
@@ -272,9 +310,14 @@ async fn parses_login_and_keepalive_route_snapshots_without_guessing_subnets() {
         "10.42.0.3"
     );
     assert_eq!(session.allowed_routes()[0].prefix, 32);
+    let initial = session.route_snapshot().unwrap();
+    assert_eq!(initial.revision(), Some("network-20-login"));
+    assert!(initial.lease_deadline().unwrap() > std::time::Instant::now());
     let refreshed = session.keepalive().await.unwrap().unwrap();
-    assert_eq!(refreshed.len(), 1);
-    assert_eq!(refreshed[0].destination.to_string(), "10.42.0.5");
+    assert_eq!(refreshed.revision(), Some("network-20-keepalive"));
+    assert!(refreshed.lease_deadline().unwrap() > std::time::Instant::now());
+    assert_eq!(refreshed.routes().len(), 1);
+    assert_eq!(refreshed.routes()[0].destination.to_string(), "10.42.0.5");
     task.abort();
 }
 
@@ -297,7 +340,9 @@ async fn two_nodes_receive_only_the_other_nodes_exact_route() {
                 "node_ip": node_ip,
                 "node_id": node_id,
                 "network_id": 11,
-                "allowed_routes": [peer_ip]
+                "allowed_routes": [peer_ip],
+                "route_revision": "network-11-fixture",
+                "route_lease_seconds": 120
             }))
         }),
     );
@@ -346,6 +391,61 @@ async fn rejects_unsafe_or_broad_routes_from_the_backend() {
                     "node_ip": "10.42.0.2",
                     "allowed_routes": [route]
                 }))
+            }),
+        );
+        let (url, task) = serve(app).await;
+
+        let error = Session::login(&url, None, Some("client_a"), "password", true)
+            .await
+            .err()
+            .unwrap();
+
+        assert_eq!(error.code, "protocol");
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn rejects_incomplete_or_unsafe_route_snapshot_metadata() {
+    for snapshot in [
+        json!({
+            "allowed_routes": ["10.42.0.3/32"],
+            "route_revision": "network-20-only-revision"
+        }),
+        json!({
+            "allowed_routes": ["10.42.0.3/32"],
+            "route_lease_seconds": 120
+        }),
+        json!({
+            "allowed_routes": ["10.42.0.3/32"],
+            "route_revision": "network-20-too-short",
+            "route_lease_seconds": 29
+        }),
+        json!({
+            "allowed_routes": ["10.42.0.3/32"],
+            "route_revision": " network-20-spaced ",
+            "route_lease_seconds": 120
+        }),
+        json!({
+            "route_revision": "network-20-no-routes",
+            "route_lease_seconds": 120
+        }),
+    ] {
+        let app = Router::new().route(
+            "/api/tinc/client/login",
+            post(move || async move {
+                let mut response = json!({
+                    "status": 1,
+                    "sid": "client_a",
+                    "token": "opaque",
+                    "net_name": "office",
+                    "node_ip": "10.42.0.2"
+                });
+                response
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(snapshot.as_object().unwrap().clone());
+                Json(response)
             }),
         );
         let (url, task) = serve(app).await;
