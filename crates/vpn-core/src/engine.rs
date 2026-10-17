@@ -1043,6 +1043,15 @@ impl Engine {
                     .complete(&RouteOperation::Add(route.clone()));
                 return self.write_adapter_state(ip);
             }
+            if self.linux_route_conflicts(target).await? {
+                return Err(Error::new(
+                    "route_conflict",
+                    format!(
+                        "目标地址 {target}/32 与本机现有网络路由冲突，未修改系统路由；请断开冲突网络或联系管理员调整 VPN 地址"
+                    ),
+                    false,
+                ));
+            }
             let mut c = Command::new("/usr/sbin/ip");
             c.args(linux_add_route_args(&self.settings.interface, target));
             run_adapter(c).await?;
@@ -1135,6 +1144,33 @@ impl Engine {
             ));
         }
         Ok(!output.stdout.is_empty())
+    }
+
+    #[cfg(unix)]
+    async fn linux_route_conflicts(&self, target: std::net::Ipv4Addr) -> Result<bool> {
+        let mut command = Command::new("/usr/sbin/ip");
+        command.args(linux_matching_route_args(target));
+        command.kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .map_err(|_| Error::new("route_check", "检查 Linux 目标路由超时", true))?
+            .map_err(|_| Error::new("route_check", "无法检查 Linux 目标路由", true))?;
+        if !output.status.success() {
+            return Err(Error::new(
+                "route_check",
+                "Linux 拒绝检查目标地址的现有路由",
+                true,
+            ));
+        }
+        parse_linux_route_conflict(&output.stdout, target, &self.settings.interface).ok_or_else(
+            || {
+                Error::new(
+                    "route_check",
+                    "Linux 返回了无法确认的路由信息，已取消添加路由",
+                    true,
+                )
+            },
+        )
     }
 
     async fn reconcile_routes(&mut self, desired: &[RouteState]) -> Result<()> {
@@ -1532,6 +1568,68 @@ fn linux_inspect_route_args(interface: &str, target: &str, prefix: u8) -> Vec<St
 }
 
 #[cfg(unix)]
+fn linux_matching_route_args(target: std::net::Ipv4Addr) -> Vec<String> {
+    vec![
+        "-j".into(),
+        "-4".into(),
+        "route".into(),
+        "show".into(),
+        "table".into(),
+        "all".into(),
+        "match".into(),
+        format!("{target}/32"),
+    ]
+}
+
+#[cfg(any(unix, test))]
+fn parse_linux_route_conflict(
+    bytes: &[u8],
+    target: std::net::Ipv4Addr,
+    interface: &str,
+) -> Option<bool> {
+    let routes = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .as_array()?
+        .clone();
+    let target = u32::from(target);
+    let mut best_prefix = 0u8;
+    let mut best_conflicts = false;
+    for route in routes {
+        let object = route.as_object()?;
+        let destination = object.get("dst")?.as_str()?;
+        let (network, prefix) = if destination == "default" {
+            (0, 0)
+        } else if let Some((network, prefix)) = destination.split_once('/') {
+            let network = u32::from(network.parse::<std::net::Ipv4Addr>().ok()?);
+            let prefix = prefix.parse::<u8>().ok().filter(|prefix| *prefix <= 32)?;
+            (network, prefix)
+        } else {
+            (
+                u32::from(destination.parse::<std::net::Ipv4Addr>().ok()?),
+                32,
+            )
+        };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        if target & mask != network & mask || prefix < best_prefix {
+            continue;
+        }
+        let conflicts =
+            prefix > 0 && object.get("dev").and_then(serde_json::Value::as_str) != Some(interface);
+        if prefix > best_prefix {
+            best_prefix = prefix;
+            best_conflicts = conflicts;
+        } else {
+            best_conflicts |= conflicts;
+        }
+    }
+    Some(best_conflicts)
+}
+
+#[cfg(unix)]
 fn linux_add_route_args(interface: &str, target: std::net::Ipv4Addr) -> Vec<String> {
     vec![
         "route".into(),
@@ -1691,6 +1789,52 @@ mod windows_tests {
             },
             42,
         ));
+    }
+}
+
+#[cfg(test)]
+mod linux_route_parser_tests {
+    use super::*;
+
+    #[test]
+    fn default_route_does_not_block_an_exact_vpn_route() {
+        let routes = br#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0"}]"#;
+        assert_eq!(
+            parse_linux_route_conflict(routes, "10.42.0.3".parse().unwrap(), "tinc0"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn local_lan_route_on_another_interface_is_a_conflict() {
+        let routes = br#"[
+            {"dst":"default","gateway":"192.0.2.1","dev":"eth0"},
+            {"dst":"10.42.0.0/24","dev":"eth0","protocol":"kernel"}
+        ]"#;
+        assert_eq!(
+            parse_linux_route_conflict(routes, "10.42.0.3".parse().unwrap(), "tinc0"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_more_specific_owned_route_wins_over_a_lan_route() {
+        let routes = br#"[
+            {"dst":"10.42.0.0/24","dev":"eth0"},
+            {"dst":"10.42.0.3","dev":"tinc0"}
+        ]"#;
+        assert_eq!(
+            parse_linux_route_conflict(routes, "10.42.0.3".parse().unwrap(), "tinc0"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn malformed_linux_route_json_fails_closed() {
+        assert_eq!(
+            parse_linux_route_conflict(b"not-json", "10.42.0.3".parse().unwrap(), "tinc0"),
+            None
+        );
     }
 }
 
