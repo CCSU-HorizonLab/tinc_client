@@ -908,6 +908,19 @@ impl Engine {
                         true,
                     )
                 })?;
+            if platform_windows::exact_ipv4_route(tinc_index, target, route.prefix).map_err(
+                |_| {
+                    Error::new(
+                        "route_check",
+                        "无法核对 Tinc 虚拟网卡上的精确路由，已取消添加路由",
+                        true,
+                    )
+                },
+            )? {
+                self.route_manager
+                    .complete(&RouteOperation::Add(route.clone()));
+                return self.write_adapter_state(ip);
+            }
             let best = platform_windows::best_ipv4_route(target).map_err(|_| {
                 Error::new(
                     "route_check",
@@ -931,6 +944,11 @@ impl Engine {
         }
         #[cfg(unix)]
         {
+            if self.linux_route_exists(route).await? {
+                self.route_manager
+                    .complete(&RouteOperation::Add(route.clone()));
+                return self.write_adapter_state(ip);
+            }
             let mut c = Command::new("/usr/sbin/ip");
             c.args(linux_add_route_args(&self.settings.interface, target));
             run_adapter(c).await?;
@@ -948,6 +966,31 @@ impl Engine {
         }
         #[cfg(windows)]
         {
+            let target = route
+                .destination
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|_| Error::protocol("恢复记录包含无效地址"))?;
+            let tinc_index =
+                platform_windows::interface_index(&self.settings.interface).map_err(|_| {
+                    Error::new(
+                        "route_check",
+                        "无法确认 Tinc 虚拟网卡，已取消删除路由",
+                        true,
+                    )
+                })?;
+            if !platform_windows::exact_ipv4_route(tinc_index, target, route.prefix).map_err(
+                |_| {
+                    Error::new(
+                        "route_check",
+                        "无法核对 Tinc 虚拟网卡上的精确路由，已取消删除路由",
+                        true,
+                    )
+                },
+            )? {
+                self.route_manager
+                    .complete(&RouteOperation::Remove(route.clone()));
+                return self.write_adapter_state(ip);
+            }
             let system = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
             let mut c = Command::new(PathBuf::from(system).join("System32/netsh.exe"));
             c.args(windows_delete_route_args(
@@ -959,6 +1002,11 @@ impl Engine {
         }
         #[cfg(unix)]
         {
+            if !self.linux_route_exists(route).await? {
+                self.route_manager
+                    .complete(&RouteOperation::Remove(route.clone()));
+                return self.write_adapter_state(ip);
+            }
             let mut c = Command::new("/usr/sbin/ip");
             c.args(linux_delete_route_args(
                 &self.settings.interface,
@@ -970,6 +1018,29 @@ impl Engine {
         self.route_manager
             .complete(&RouteOperation::Remove(route.clone()));
         self.write_adapter_state(ip)
+    }
+
+    #[cfg(unix)]
+    async fn linux_route_exists(&self, route: &RouteState) -> Result<bool> {
+        let mut command = Command::new("/usr/sbin/ip");
+        command.args(linux_inspect_route_args(
+            &self.settings.interface,
+            &route.destination,
+            route.prefix,
+        ));
+        command.kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
+            .map_err(|_| Error::new("route_check", "检查 Linux 精确路由超时", true))?
+            .map_err(|_| Error::new("route_check", "无法检查 Linux 精确路由", true))?;
+        if !output.status.success() {
+            return Err(Error::new(
+                "route_check",
+                "Linux 拒绝检查 Tinc 接口上的精确路由",
+                true,
+            ));
+        }
+        Ok(!output.stdout.is_empty())
     }
 
     async fn reconcile_routes(&mut self, desired: &[RouteState]) -> Result<()> {
@@ -1347,6 +1418,18 @@ fn linux_clear_address_args(interface: &str, ip: &str, prefix: u8) -> Vec<String
 }
 
 #[cfg(unix)]
+fn linux_inspect_route_args(interface: &str, target: &str, prefix: u8) -> Vec<String> {
+    vec![
+        "route".into(),
+        "show".into(),
+        "exact".into(),
+        format!("{target}/{prefix}"),
+        "dev".into(),
+        interface.into(),
+    ]
+}
+
+#[cfg(unix)]
 fn linux_add_route_args(interface: &str, target: std::net::Ipv4Addr) -> Vec<String> {
     vec![
         "route".into(),
@@ -1526,6 +1609,10 @@ mod linux_tests {
         assert_eq!(
             linux_link_args("tinc0", "down"),
             ["link", "set", "dev", "tinc0", "down"]
+        );
+        assert_eq!(
+            linux_inspect_route_args("tinc0", "10.42.0.1", 32),
+            ["route", "show", "exact", "10.42.0.1/32", "dev", "tinc0"]
         );
         assert_eq!(
             linux_add_route_args("tinc0", "10.42.0.1".parse().unwrap()),

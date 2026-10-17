@@ -70,6 +70,44 @@ pub fn best_ipv4_route(target: Ipv4Addr) -> io::Result<Ipv4Route> {
     })
 }
 
+pub fn exact_ipv4_route(
+    interface_index: u32,
+    target: Ipv4Addr,
+    prefix_length: u8,
+) -> io::Result<bool> {
+    struct Table(*mut MIB_IPFORWARD_TABLE2);
+    impl Drop for Table {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { FreeMibTable(self.0.cast()) };
+            }
+        }
+    }
+
+    let mut table = ptr::null_mut();
+    let error = unsafe { GetIpForwardTable2(AF_INET, &mut table) };
+    if error != NO_ERROR {
+        return Err(io::Error::from_raw_os_error(error as i32));
+    }
+    let table = Table(table);
+    let rows = unsafe {
+        std::slice::from_raw_parts((*table.0).Table.as_ptr(), (*table.0).NumEntries as usize)
+    };
+    Ok(rows.iter().any(|row| {
+        if row.InterfaceIndex != interface_index
+            || row.DestinationPrefix.PrefixLength != prefix_length
+        {
+            return false;
+        }
+        let address = unsafe {
+            let ipv4 = row.DestinationPrefix.Prefix.Ipv4;
+            let bytes = ipv4.sin_addr.S_un.S_un_b;
+            Ipv4Addr::new(bytes.s_b1, bytes.s_b2, bytes.s_b3, bytes.s_b4)
+        };
+        address == target
+    }))
+}
+
 pub struct PipeSecurity {
     descriptor: PSECURITY_DESCRIPTOR,
 }
