@@ -231,6 +231,24 @@ fn route_lease_missing() -> Error {
     )
 }
 
+fn running_route_lease_expired(
+    child_exists: bool,
+    process_running: bool,
+    deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    child_exists && process_running && deadline.is_none_or(|deadline| now >= deadline)
+}
+
+fn route_snapshot_needs_reconcile(
+    current_revision: Option<&str>,
+    current_routes: &[RouteState],
+    next_revision: &str,
+    next_routes: &[RouteState],
+) -> bool {
+    current_revision != Some(next_revision) || current_routes != next_routes
+}
+
 fn read_adapter_state(
     root: &Path,
     settings: &Settings,
@@ -655,12 +673,12 @@ impl Engine {
         Ok(())
     }
     pub async fn poll(&mut self) -> Result<()> {
-        if self.child.is_some()
-            && self.status.read().await.process_running
-            && self
-                .route_lease_deadline
-                .is_none_or(|deadline| std::time::Instant::now() >= deadline)
-        {
+        if running_route_lease_expired(
+            self.child.is_some(),
+            self.status.read().await.process_running,
+            self.route_lease_deadline,
+            std::time::Instant::now(),
+        ) {
             return Err(Error::new(
                 "route_lease_expired",
                 "路由授权租约已到期，VPN 将停止并清理自有路由",
@@ -781,9 +799,13 @@ impl Engine {
             ));
         }
         let desired = managed_routes(gateway, snapshot.routes())?;
-        let revision_changed = self.route_revision.as_deref() != Some(revision);
         self.route_lease_deadline = Some(deadline);
-        if revision_changed || self.route_manager.desired() != desired {
+        if route_snapshot_needs_reconcile(
+            self.route_revision.as_deref(),
+            self.route_manager.desired(),
+            revision,
+            &desired,
+        ) {
             self.route_revision = Some(revision.to_owned());
             self.reconcile_routes(&desired).await?;
             let ip = self
@@ -1868,6 +1890,56 @@ mod linux_tests {
             linux_delete_route_args("tinc0", "10.42.0.1", 32),
             ["route", "delete", "10.42.0.1/32", "dev", "tinc0"]
         );
+    }
+}
+
+#[cfg(test)]
+mod route_lifecycle_tests {
+    use super::*;
+
+    fn route(last: u8) -> RouteState {
+        RouteState {
+            destination: format!("10.0.11.{last}"),
+            prefix: 32,
+        }
+    }
+
+    #[test]
+    fn lease_check_starts_only_after_tinc_is_fully_running() {
+        let now = std::time::Instant::now();
+        assert!(!running_route_lease_expired(true, false, None, now));
+        assert!(running_route_lease_expired(true, true, None, now));
+        assert!(!running_route_lease_expired(
+            true,
+            true,
+            Some(now + Duration::from_secs(1)),
+            now
+        ));
+        assert!(running_route_lease_expired(true, true, Some(now), now));
+        assert!(!running_route_lease_expired(false, true, None, now));
+    }
+
+    #[test]
+    fn unchanged_revision_and_routes_skip_reconciliation() {
+        let current = vec![route(1), route(212)];
+        assert!(!route_snapshot_needs_reconcile(
+            Some("routes-fixture"),
+            &current,
+            "routes-fixture",
+            &current,
+        ));
+        assert!(route_snapshot_needs_reconcile(
+            Some("routes-fixture"),
+            &current,
+            "routes-next",
+            &current,
+        ));
+        assert!(route_snapshot_needs_reconcile(
+            Some("routes-fixture"),
+            &current,
+            "routes-fixture",
+            &[route(1), route(211)],
+        ));
     }
 }
 
