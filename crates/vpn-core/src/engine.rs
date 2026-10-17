@@ -239,6 +239,7 @@ pub struct Engine {
     pub logs: Arc<Mutex<Vec<LogEntry>>>,
     settings: Settings,
     session: Option<Session>,
+    session_epoch: u64,
     active: Option<Active>,
     child: Option<Child>,
     adapter_address_configured: bool,
@@ -292,6 +293,7 @@ impl Engine {
             logs: Arc::new(Mutex::new(Vec::new())),
             settings,
             session: None,
+            session_epoch: 0,
             active,
             child: None,
             adapter_address_configured: adapter_state.is_some(),
@@ -341,6 +343,7 @@ impl Engine {
                 }
             }
             self.session = None;
+            self.session_epoch = self.session_epoch.wrapping_add(1);
             self.status.write().await.session = None;
         } else if error.code == "node_revoked" {
             // Revocation is a node-lifecycle event, not merely a failed HTTP request.
@@ -355,6 +358,7 @@ impl Engine {
                 }
             }
             self.session = None;
+            self.session_epoch = self.session_epoch.wrapping_add(1);
             let mut status = self.status.write().await;
             status.session = None;
             status.phase = Phase::Failed;
@@ -425,6 +429,7 @@ impl Engine {
                     }
                 }
                 self.session = Some(session);
+                self.session_epoch = self.session_epoch.wrapping_add(1);
                 self.log("登录成功，已取得后台分配的网络与节点地址").await;
             }
             Request::Configure => self.configure().await?,
@@ -436,6 +441,7 @@ impl Engine {
                     self.stop().await?;
                 }
                 self.session = None;
+                self.session_epoch = self.session_epoch.wrapping_add(1);
                 self.status.write().await.session = None;
                 self.last_keepalive = None;
                 self.log("VPN 已停止，本地会话已清除；服务端未提供撤销接口")
@@ -663,28 +669,48 @@ impl Engine {
         {
             self.probe_connection().await;
         }
+        Ok(())
+    }
+
+    /// Starts a periodic keepalive without retaining the Agent's Engine lock
+    /// while the HTTP request is in flight.
+    pub async fn begin_background_keepalive(&mut self) -> Option<(Session, u64)> {
         let process_running = self.status.read().await.process_running;
         if background_keepalive_due(self.child.is_some(), process_running, self.last_keepalive) {
-            let keepalive = if let Some(session) = self.session.as_ref() {
-                self.last_keepalive = Some(tokio::time::Instant::now());
-                Some(session.keepalive().await)
-            } else {
-                None
-            };
-            if let Some(keepalive) = keepalive {
-                if let Err(error) = &keepalive {
-                    if error.code == "node_revoked" || error.code == "auth_expired" {
-                        return Err(error.clone());
-                    }
-                }
-                if let Ok(Some(allowed_routes)) = keepalive {
-                    let gateway = self.probe_target.ok_or_else(|| {
-                        Error::new("route_sync", "VPN 运行状态缺少网关路由目标", true)
-                    })?;
-                    let desired = managed_routes(gateway, &allowed_routes)?;
-                    self.reconcile_routes(&desired).await?;
-                }
+            self.last_keepalive = Some(tokio::time::Instant::now());
+            self.session
+                .clone()
+                .map(|session| (session, self.session_epoch))
+        } else {
+            None
+        }
+    }
+
+    pub async fn finish_background_keepalive(
+        &mut self,
+        session_epoch: u64,
+        keepalive: Result<Option<Vec<AllowedRoute>>>,
+    ) -> Result<()> {
+        if session_epoch != self.session_epoch {
+            return Ok(());
+        }
+        if let Err(error) = &keepalive {
+            if error.code == "node_revoked" || error.code == "auth_expired" {
+                return Err(error.clone());
             }
+            // A transient request failure does not revoke an otherwise valid
+            // local session. The next interval retries it.
+            return Ok(());
+        }
+        if self.child.is_none() || !self.status.read().await.process_running {
+            return Ok(());
+        }
+        if let Ok(Some(allowed_routes)) = keepalive {
+            let gateway = self
+                .probe_target
+                .ok_or_else(|| Error::new("route_sync", "VPN 运行状态缺少网关路由目标", true))?;
+            let desired = managed_routes(gateway, &allowed_routes)?;
+            self.reconcile_routes(&desired).await?;
         }
         Ok(())
     }

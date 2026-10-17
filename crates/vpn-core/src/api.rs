@@ -24,6 +24,7 @@ fn has_media_type(value: Option<&str>, expected: &str) -> bool {
     })
 }
 
+#[derive(Clone)]
 pub struct Session {
     pub identity: Identity,
     pub origin: String,

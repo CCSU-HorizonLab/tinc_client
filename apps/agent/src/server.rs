@@ -50,10 +50,26 @@ pub async fn serve(
     let ticker = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            if let Ok(mut engine) = tick_engine.try_lock() {
+            let session = if let Ok(mut engine) = tick_engine.try_lock() {
                 if let Err(error) = engine.poll().await {
                     engine.fail(error).await;
+                    None
+                } else {
+                    engine.begin_background_keepalive().await
                 }
+            } else {
+                None
+            };
+            let Some((session, session_epoch)) = session else {
+                continue;
+            };
+            let keepalive = session.keepalive().await;
+            let mut engine = tick_engine.lock().await;
+            if let Err(error) = engine
+                .finish_background_keepalive(session_epoch, keepalive)
+                .await
+            {
+                engine.fail(error).await;
             }
         }
     });
