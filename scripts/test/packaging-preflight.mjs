@@ -12,8 +12,18 @@ const clientUninstaller=await readFile(resolve(root,'packaging/windows/uninstall
 const installerHooks=await readFile(resolve(root,'packaging/windows/installer-hooks.nsh'),'utf8');
 const windowsBuild=await readFile(resolve(root,'scripts/build/windows.ps1'),'utf8');
 const tauriConfig=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.conf.json'),'utf8'));
+const rootPackage=JSON.parse(await readFile(resolve(root,'package.json'),'utf8'));
+const desktopPackage=JSON.parse(await readFile(resolve(root,'apps/desktop/package.json'),'utf8'));
+const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
+
+const cargoVersion=workspaceCargo.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)?.[1];
+assert(cargoVersion,'Cargo workspace version is missing');
+assert.equal(rootPackage.version,desktopPackage.version,'Root and desktop npm versions must match');
+assert.equal(rootPackage.version,tauriConfig.version,'npm and Tauri bundle versions must match');
+assert.equal(rootPackage.version,cargoVersion,'UI, Agent, and Rust core versions must match');
+assert.notEqual(rootPackage.version,'0.1.0','Current development installer must not be confused with the old 0.1.0 package');
 
 for(const expected of ['TincSha256','Get-FileHash','-Algorithm SHA256','tinc version 1\\.0\\.36','Get-NetAdapter','TAP-Windows Adapter V9']) assert.match(windows,new RegExp(expected));
 assert.doesNotMatch(windows,/\$_\.Extension -eq '\.dll'/,'A single-file Tinc approval must not copy arbitrary DLLs');

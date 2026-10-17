@@ -2508,7 +2508,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "platform-linux"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "tokio",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tokio",
  "windows-sys 0.59.0",
@@ -3963,7 +3963,7 @@ dependencies = [
 
 [[package]]
 name = "tinc-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tauri",
  "tauri-build",
@@ -4390,7 +4390,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpn-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fs2",
  "platform-linux",
@@ -4404,7 +4404,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "fs2",
@@ -4425,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "vpn-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "platform-linux",
  "platform-windows",
