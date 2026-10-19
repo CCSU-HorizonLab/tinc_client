@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 
-import {agentVersionView,connectionView,controls,failure,isHttpOrigin,isValidAccessCode,normalizeAccessCode,type Status} from './client';
+import {agentVersionView,connectionView,controls,failure,isHttpOrigin,isValidAccessCode,isValidServerOrigin,normalizeAccessCode,type Status} from './client';
 const status:Status={agent_version:'0.1.1',phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
 describe('failure recovery controls',()=>{
  it('allows retry and starting retained config only for the logged-in profile',()=>expect(controls(status,false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
@@ -34,6 +34,13 @@ describe('server address controls',()=>{
  it('recognizes HTTP after whitespace and with uppercase scheme',()=>{
   expect(isHttpOrigin('  HTTP://127.0.0.1:8081')).toBe(true);
   expect(isHttpOrigin('https://vpn.example.com')).toBe(false);
+ });
+ it('accepts only an HTTP or HTTPS service root without credentials or URL suffixes',()=>{
+  expect(isValidServerOrigin('https://vpn.example.com')).toBe(true);
+  expect(isValidServerOrigin('http://8.148.13.80:83')).toBe(true);
+  for (const invalid of ['https://','vpn.example.com','ftp://vpn.example.com','https://user:pass@vpn.example.com','https://vpn.example.com/api','https://vpn.example.com?token=secret','https://vpn.example.com/#fragment']) {
+   expect(isValidServerOrigin(invalid)).toBe(false);
+  }
  });
 });
 describe('connection status',()=>{

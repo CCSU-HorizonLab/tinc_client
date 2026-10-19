@@ -24,6 +24,20 @@ export function agentVersionView(status: Status|null, appVersion:string, availab
 export function isHttpOrigin(value:string):boolean {
   return value.trim().toLowerCase().startsWith('http://');
 }
+export function isValidServerOrigin(value:string):boolean {
+  try {
+    const url=new URL(value.trim());
+    return (url.protocol==='https:'||url.protocol==='http:')
+      && !!url.hostname
+      && !url.username
+      && !url.password
+      && !url.search
+      && !url.hash
+      && url.pathname==='/';
+  } catch {
+    return false;
+  }
+}
 export function normalizeAccessCode(value:string):string {
   return value.trim().toUpperCase();
 }

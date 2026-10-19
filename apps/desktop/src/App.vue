@@ -9,6 +9,7 @@ import {
   failure,
   isHttpOrigin,
   isValidAccessCode,
+  isValidServerOrigin,
   labels,
   normalizeAccessCode,
   type Command,
@@ -104,6 +105,7 @@ const refreshing = ref(false);
 const identity = computed(() => status.value?.configured ?? status.value?.session);
 const shownError = computed(() => error.value ?? (available.value ? status.value?.last_error : null));
 const httpServer = computed(() => isHttpOrigin(server.value));
+const serverValid = computed(() => isValidServerOrigin(server.value));
 const accessCodeValid = computed(() => isValidAccessCode(accessCode.value));
 const tunnel = computed(() => connectionView(available.value ? status.value : null));
 const agentVersion = computed(() => agentVersionView(status.value, appVersion, available.value));
@@ -139,6 +141,22 @@ async function act(command: Command) {
     error.value = {
       code: 'access_code_invalid',
       message: '接入码格式无效，请输入类似 TL-7K9M-2Q4F 的完整接入码',
+      retryable: false,
+    };
+    return;
+  }
+  if (command === 'login' && !isValidServerOrigin(server.value)) {
+    error.value = {
+      code: 'server_invalid',
+      message: '服务地址必须是完整的 HTTP/HTTPS 根地址，不能包含路径、账号、查询参数或片段',
+      retryable: false,
+    };
+    return;
+  }
+  if (command === 'login' && isHttpOrigin(server.value) && !allowHttp.value) {
+    error.value = {
+      code: 'plaintext_not_allowed',
+      message: '当前服务地址使用 HTTP；仅在确认开发环境允许明文传输后才能登录',
       retryable: false,
     };
     return;
@@ -259,9 +277,13 @@ onUnmounted(() => clearInterval(timer));
                 v-model="server"
                 placeholder="https://vpn.example.com"
                 autocomplete="url"
+                :aria-invalid="!serverValid"
                 :disabled="busy"
               />
             </label>
+            <p v-if="!serverValid" class="field-warning">
+              请输入完整服务根地址，例如 https://vpn.example.com。
+            </p>
             <label>
               接入码
               <input
@@ -296,7 +318,7 @@ onUnmounted(() => clearInterval(timer));
             </p>
             <button
               class="primary full"
-              :disabled="busy || !available || !accessCodeValid || !password || (httpServer && !allowHttp)"
+              :disabled="busy || !available || !serverValid || !accessCodeValid || !password || (httpServer && !allowHttp)"
             >
               {{ busy ? '操作处理中…' : status?.session ? '重新登录' : '登录节点' }}
               <span>→</span>
