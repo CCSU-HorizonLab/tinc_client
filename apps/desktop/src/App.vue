@@ -8,7 +8,9 @@ import {
   controls,
   failure,
   isHttpOrigin,
+  isValidAccessCode,
   labels,
+  normalizeAccessCode,
   type Command,
   type Failure,
   type LogEntry,
@@ -23,7 +25,7 @@ const allowHttp = ref(false);
 const appVersion = desktopPackage.version;
 
 function onAccessCodeBlur() {
-  accessCode.value = accessCode.value.trim().toUpperCase();
+  accessCode.value = normalizeAccessCode(accessCode.value);
 }
 
 const status = ref<Status | null>(null);
@@ -102,6 +104,7 @@ const refreshing = ref(false);
 const identity = computed(() => status.value?.configured ?? status.value?.session);
 const shownError = computed(() => error.value ?? (available.value ? status.value?.last_error : null));
 const httpServer = computed(() => isHttpOrigin(server.value));
+const accessCodeValid = computed(() => isValidAccessCode(accessCode.value));
 const tunnel = computed(() => connectionView(available.value ? status.value : null));
 const agentVersion = computed(() => agentVersionView(status.value, appVersion, available.value));
 const buttons = computed(() =>
@@ -130,10 +133,19 @@ async function refresh(manual = false) {
 // ── 用户操作 ────────────────────────────────────────────────
 async function act(command: Command) {
   if (busy.value) return;
+  const normalizedCode = normalizeAccessCode(accessCode.value);
+  if (command === 'login' && !isValidAccessCode(normalizedCode)) {
+    accessCode.value = normalizedCode;
+    error.value = {
+      code: 'access_code_invalid',
+      message: '接入码格式无效，请输入类似 TL-7K9M-2Q4F 的完整接入码',
+      retryable: false,
+    };
+    return;
+  }
   busy.value = true;
   error.value = null;
   try {
-    const normalizedCode = accessCode.value.trim().toUpperCase();
     accessCode.value = normalizedCode;
     const args =
       command === 'login'
@@ -257,10 +269,14 @@ onUnmounted(() => clearInterval(timer));
                 placeholder="TL-7K9M-2Q4F"
                 autocomplete="username"
                 maxlength="16"
+                :aria-invalid="!!accessCode.trim() && !accessCodeValid"
                 :disabled="busy"
                 @blur="onAccessCodeBlur"
               />
             </label>
+            <p v-if="accessCode.trim() && !accessCodeValid" class="field-warning">
+              接入码格式应为 TL-XXXX-XXXX，且不使用易混淆字符 0、1、I、L、O。
+            </p>
             <label>
               密码
               <input
@@ -280,7 +296,7 @@ onUnmounted(() => clearInterval(timer));
             </p>
             <button
               class="primary full"
-              :disabled="busy || !available || !accessCode.trim() || !password || (httpServer && !allowHttp)"
+              :disabled="busy || !available || !accessCodeValid || !password || (httpServer && !allowHttp)"
             >
               {{ busy ? '操作处理中…' : status?.session ? '重新登录' : '登录节点' }}
               <span>→</span>
@@ -416,5 +432,10 @@ footer .outdated {
 .version-warning small {
   display: block;
   margin-top: 5px;
+}
+
+.field-warning {
+  color: #9b441d;
+  margin: -9px 0 15px;
 }
 </style>

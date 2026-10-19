@@ -27,6 +27,7 @@ describe('access code specification controls',()=>{
   expect(isValidAccessCode('TL-OOOO-XXXX')).toBe(false);
   expect(isValidAccessCode('TL-SHORT')).toBe(false);
   expect(isValidAccessCode('NODE_NAME_ONLY')).toBe(false);
+  expect(isValidAccessCode('   ')).toBe(false);
  });
 });
 describe('server address controls',()=>{
