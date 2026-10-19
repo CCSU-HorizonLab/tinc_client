@@ -1,6 +1,7 @@
 // Static contract checks for installer preflight guards. They never touch services,
 // drivers, adapters, or real system paths, so they are safe in CI.
 import assert from 'node:assert/strict';
+import {existsSync} from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
@@ -42,7 +43,8 @@ for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',
   'Get-AuthenticodeSignature','VerifyOnly','Ensure-TapAdapter',
-  'Get-AdapterGuidValue','New-Service','Wait-ServiceState','Wait-AgentPipe','installer.log','interface_prefix = 32'
+  'Get-AdapterGuidValue','New-Service','Wait-ServiceState','Wait-AgentPipe','installer.log','interface_prefix = 32',
+  'ProgramW6432','Get-NativeProgramFiles'
 ]) assert.match(clientInstaller,new RegExp(expected));
 assert.doesNotMatch(clientInstaller,/InterfaceGuid\.Guid/,'Get-NetAdapter exposes InterfaceGuid as a string on supported Windows builds');
 assert.match(clientInstaller,/\$SettingsPath\s*=\s*Join-Path \$DataRoot "settings\.json"/,'Installer must write the exact settings file read by the Windows Agent');
@@ -63,6 +65,8 @@ assert.doesNotMatch(clientInstaller,/Start-Service -Name \$ServiceName -ErrorAct
 assert(clientInstaller.includes("O=OpenVPN Inc\\."),'Installer must constrain the TAP Authenticode signer');
 assert.match(clientUninstaller,/ProgramData\\TincClient[\s\S]*preserve/i,'Uninstaller must preserve user network data and key material');
 assert.match(clientUninstaller,/PathName -ne \$expectedCommand/,'Uninstaller must not delete a same-named unexpected service');
+assert.match(clientUninstaller,/ProgramW6432/,'Uninstaller must resolve the native Program Files directory when launched by 32-bit NSIS');
+assert.match(clientUninstaller,/\$AgentRoot\s*=\s*Join-Path \(Get-NativeProgramFiles\) "TincClientAgent"/,'Uninstaller must validate the same native Agent location used by the installer');
 assert.match(installerHooks,/NSIS_HOOK_POSTINSTALL[\s\S]*install-client\.ps1[\s\S]*NSIS_HOOK_PREUNINSTALL[\s\S]*uninstall-client\.ps1/);
 assert.equal(tauriConfig.bundle.windows.nsis.installMode,'perMachine','Driver/service installer must request machine-level elevation');
 assert.equal(tauriConfig.bundle.windows.nsis.installerHooks,'../../../packaging/windows/installer-hooks.nsh');
@@ -135,6 +139,27 @@ try {
 }`;
   const rollbackRestoreCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',rollbackRestore],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,'packaging/windows/install-client.ps1')}});
   assert.equal(rollbackRestoreCheck.status,0,rollbackRestoreCheck.stderr||rollbackRestoreCheck.stdout);
+  const nativeProgramFiles=`
+Set-StrictMode -Version Latest
+$tokens=$null
+$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:TINC_CLIENT_SCRIPT,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw $errors[0] }
+$functionAst=$ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-NativeProgramFiles' },$true)
+if ($null -eq $functionAst) { throw 'Get-NativeProgramFiles was not found.' }
+. ([scriptblock]::Create($functionAst.Extent.Text))
+$expected=$env:ProgramW6432
+if ([string]::IsNullOrWhiteSpace($expected)) { $expected=$env:ProgramFiles }
+$actual=Get-NativeProgramFiles
+if (-not $actual.Equals([IO.Path]::GetFullPath($expected).TrimEnd('\\'),[StringComparison]::OrdinalIgnoreCase)) {
+  throw "Expected native Program Files '$expected', got '$actual'."
+}`;
+  const nativeShell=resolve(process.env.SystemRoot,'SysWOW64','WindowsPowerShell','v1.0','powershell.exe');
+  const powershellForNativePath=existsSync(nativeShell)?nativeShell:'powershell.exe';
+  for(const script of ['packaging/windows/install-client.ps1','packaging/windows/uninstall-client.ps1']){
+    const nativePathCheck=spawnSync(powershellForNativePath,['-NoProfile','-NonInteractive','-Command',nativeProgramFiles],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,script)}});
+    assert.equal(nativePathCheck.status,0,`${script}: ${nativePathCheck.stderr||nativePathCheck.stdout}`);
+  }
   const phase2Check=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve(root,'scripts/test/phase2-preflight.ps1')],{encoding:'utf8'});
   assert.equal(phase2Check.status,0,phase2Check.stderr||phase2Check.stdout);
   const phase2Report=JSON.parse(phase2Check.stdout);

@@ -4,7 +4,19 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $ServiceName = "TincClientAgent"
-$AgentRoot = Join-Path $env:ProgramFiles "TincClientAgent"
+
+function Get-NativeProgramFiles {
+    $nativeProgramFiles = [Environment]::GetEnvironmentVariable("ProgramW6432")
+    if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+        $nativeProgramFiles = $env:ProgramFiles
+    }
+    if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+        throw "The native Program Files directory is unavailable."
+    }
+    return [IO.Path]::GetFullPath($nativeProgramFiles).TrimEnd('\')
+}
+
+$AgentRoot = Join-Path (Get-NativeProgramFiles) "TincClientAgent"
 $DataRoot = Join-Path $env:ProgramData "TincClient"
 $InstallStatePath = Join-Path $DataRoot "install-state.json"
 
@@ -18,7 +30,7 @@ if (-not (Test-IsAdministrator)) {
     throw "Administrator privileges are required to remove the Agent service."
 }
 
-$expectedRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles "TincClientAgent")).TrimEnd('\')
+$expectedRoot = [IO.Path]::GetFullPath((Join-Path (Get-NativeProgramFiles) "TincClientAgent")).TrimEnd('\')
 $resolvedRoot = [IO.Path]::GetFullPath($AgentRoot).TrimEnd('\')
 if (-not $resolvedRoot.Equals($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to remove an unexpected Agent path: $resolvedRoot"

@@ -13,7 +13,19 @@ $InterfaceName = "tinc"
 $ExpectedTincVersion = "1.0.36"
 $ExpectedTincSha256 = "746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C"
 $ExpectedTapSha256 = "1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C"
-$AgentRoot = Join-Path $env:ProgramFiles "TincClientAgent"
+
+function Get-NativeProgramFiles {
+    $nativeProgramFiles = [Environment]::GetEnvironmentVariable("ProgramW6432")
+    if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+        $nativeProgramFiles = $env:ProgramFiles
+    }
+    if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+        throw "The native Program Files directory is unavailable."
+    }
+    return [IO.Path]::GetFullPath($nativeProgramFiles).TrimEnd('\')
+}
+
+$AgentRoot = Join-Path (Get-NativeProgramFiles) "TincClientAgent"
 $DataRoot = Join-Path $env:ProgramData "TincClient"
 $DataDirectory = Join-Path $DataRoot "data"
 $SettingsPath = Join-Path $DataRoot "settings.json"
