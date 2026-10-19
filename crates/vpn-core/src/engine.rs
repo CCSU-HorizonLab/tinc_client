@@ -50,6 +50,14 @@ fn background_keepalive_due(
         && last_keepalive.is_none_or(|last| last.elapsed() >= KEEPALIVE_INTERVAL)
 }
 
+fn session_authorization_lost(code: &str) -> bool {
+    matches!(code, "auth_expired" | "assignment_missing")
+}
+
+fn keepalive_error_requires_immediate_failure(code: &str) -> bool {
+    session_authorization_lost(code) || code == "node_revoked"
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeepaliveTicket {
     session_epoch: u64,
@@ -407,7 +415,7 @@ impl Engine {
         });
     }
     pub async fn fail(&mut self, error: Error) -> Reply {
-        if error.code == "auth_expired" {
+        if session_authorization_lost(&error.code) {
             if self.child.is_some() || self.adapter_cleanup_pending() {
                 if let Err(cleanup_error) = self.stop().await {
                     self.log(&cleanup_error.message).await;
@@ -812,7 +820,7 @@ impl Engine {
         }
         self.active_keepalive_request = None;
         if let Err(error) = &keepalive {
-            if error.code == "node_revoked" || error.code == "auth_expired" {
+            if keepalive_error_requires_immediate_failure(&error.code) {
                 return Err(error.clone());
             }
             // A transient or malformed response does not revoke an otherwise
@@ -2130,6 +2138,20 @@ mod route_lifecycle_tests {
         assert!(!keepalive_ticket_is_current(current, 5, 7, Some(10)));
         assert!(!keepalive_ticket_is_current(current, 4, 8, Some(10)));
         assert!(!keepalive_ticket_is_current(current, 4, 7, Some(11)));
+    }
+
+    #[test]
+    fn missing_node_immediately_invalidates_the_session_without_becoming_revocation() {
+        assert!(session_authorization_lost("auth_expired"));
+        assert!(session_authorization_lost("assignment_missing"));
+        assert!(!session_authorization_lost("node_revoked"));
+        assert!(keepalive_error_requires_immediate_failure("node_revoked"));
+        assert!(keepalive_error_requires_immediate_failure(
+            "assignment_missing"
+        ));
+        assert!(!keepalive_error_requires_immediate_failure(
+            "route_snapshot_unavailable"
+        ));
     }
 }
 

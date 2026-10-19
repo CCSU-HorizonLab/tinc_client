@@ -7,6 +7,7 @@ const CONTRACT_LOGIN: &str = include_str!("fixtures/server-contract/login-succes
 const CONTRACT_KEEPALIVE: &str = include_str!("fixtures/server-contract/keepalive-success.json");
 const CONTRACT_TOKEN_INVALID: &str = include_str!("fixtures/server-contract/token-invalid.json");
 const CONTRACT_NODE_REVOKED: &str = include_str!("fixtures/server-contract/node-revoked.json");
+const CONTRACT_NODE_NOT_FOUND: &str = include_str!("fixtures/server-contract/node-not-found.json");
 const CONTRACT_ROUTE_UNAVAILABLE: &str =
     include_str!("fixtures/server-contract/route-unavailable.json");
 async fn serve(app: Router) -> (String, tokio::task::JoinHandle<()>) {
@@ -323,6 +324,12 @@ async fn maps_formal_keepalive_http_status_and_business_code_pairs() {
             StatusCode::GONE,
             CONTRACT_NODE_REVOKED,
             "node_revoked",
+            false,
+        ),
+        (
+            StatusCode::NOT_FOUND,
+            CONTRACT_NODE_NOT_FOUND,
+            "assignment_missing",
             false,
         ),
         (
