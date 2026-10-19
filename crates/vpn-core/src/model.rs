@@ -72,6 +72,8 @@ impl Eq for Identity {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Status {
+    #[serde(default)]
+    pub agent_version: String,
     pub phase: Phase,
     pub session: Option<Identity>,
     pub configured: Option<Identity>,
@@ -84,6 +86,7 @@ pub struct Status {
 impl Default for Status {
     fn default() -> Self {
         Self {
+            agent_version: env!("CARGO_PKG_VERSION").into(),
             phase: Phase::Unconfigured,
             session: None,
             configured: None,
@@ -93,6 +96,26 @@ impl Default for Status {
             stage: "等待配置".into(),
             last_error: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Status;
+
+    #[test]
+    fn default_status_reports_the_running_agent_version() {
+        assert_eq!(Status::default().agent_version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn legacy_status_without_agent_version_remains_compatible() {
+        let status: Status = serde_json::from_str(
+            r#"{"phase":"stopped","session":null,"configured":null,"process_running":false,"connection":"unknown","confirmation":"unavailable","stage":"等待启动","last_error":null}"#,
+        )
+        .expect("legacy status should deserialize");
+
+        assert!(status.agent_version.is_empty());
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

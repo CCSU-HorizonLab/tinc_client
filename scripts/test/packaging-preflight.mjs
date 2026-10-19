@@ -27,7 +27,8 @@ assert.equal(rootPackage.version,tauriConfig.version,'npm and Tauri bundle versi
 assert.equal(rootPackage.version,cargoVersion,'UI, Agent, and Rust core versions must match');
 assert.notEqual(rootPackage.version,'0.1.0','Current development installer must not be confused with the old 0.1.0 package');
 assert.match(desktopApp,/import desktopPackage from '\.\.\/package\.json'/,'Desktop UI must read its displayed version from package metadata');
-assert.match(desktopApp,/<span>\{\{ appVersion \}\}<\/span>/,'Desktop footer must render the package version');
+assert.match(desktopApp,/客户端 \{\{ appVersion \}\}/,'Desktop footer must render the package version');
+assert.match(desktopApp,/Agent \{\{ agentVersion\.label \}\}/,'Desktop footer must render the running Agent version');
 assert.doesNotMatch(desktopApp,/<footer>[^\r\n]*\b\d+\.\d+\.\d+\b/,'Desktop footer must not hard-code a release version');
 
 for(const expected of ['TincSha256','Get-FileHash','-Algorithm SHA256','tinc version 1\\.0\\.36','Get-NetAdapter','TAP-Windows Adapter V9']) assert.match(windows,new RegExp(expected));

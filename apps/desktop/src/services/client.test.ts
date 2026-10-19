@@ -1,7 +1,7 @@
 import {describe,it,expect} from 'vitest';
 
-import {connectionView,controls,failure,isHttpOrigin,isValidAccessCode,normalizeAccessCode,type Status} from './client';
-const status:Status={phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
+import {agentVersionView,connectionView,controls,failure,isHttpOrigin,isValidAccessCode,normalizeAccessCode,type Status} from './client';
+const status:Status={agent_version:'0.1.1',phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
 describe('failure recovery controls',()=>{
  it('allows retry and starting retained config only for the logged-in profile',()=>expect(controls(status,false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
  it('prevents duplicate operations while configuring',()=>expect(controls({...status,phase:'configuring'},false)).toEqual({configure:false,rotate:false,start:false,stop:false}));
@@ -40,4 +40,10 @@ describe('connection status',()=>{
   expect(connectionView({...status,connection:'unknown'}).label).toBe('尚未验证');
   expect(connectionView({...status,process_running:true,connection:'unknown'}).label).toBe('正在连接');
  });
+});
+describe('agent version status',()=>{
+ it('does not request an upgrade when UI and Agent versions match',()=>expect(agentVersionView(status,'0.1.1',true)).toEqual({label:'0.1.1',upgradeRequired:false}));
+ it('marks a different Agent version as requiring an upgrade',()=>expect(agentVersionView({...status,agent_version:'0.1.0'},'0.1.1',true)).toEqual({label:'0.1.0',upgradeRequired:true}));
+ it('recognizes a legacy response without a version',()=>expect(agentVersionView({...status,agent_version:''},'0.1.1',true)).toEqual({label:'旧版本',upgradeRequired:true}));
+ it('does not report an upgrade while the Agent is unavailable',()=>expect(agentVersionView(null,'0.1.1',false)).toEqual({label:'未连接',upgradeRequired:false}));
 });

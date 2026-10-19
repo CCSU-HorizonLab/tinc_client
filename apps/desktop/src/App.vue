@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import desktopPackage from '../package.json';
 import {
+  agentVersionView,
   call,
   connectionView,
   controls,
@@ -103,6 +104,7 @@ const identity = computed(() => status.value?.configured ?? status.value?.sessio
 const shownError = computed(() => error.value ?? (available.value ? status.value?.last_error : null));
 const httpServer = computed(() => isHttpOrigin(server.value));
 const tunnel = computed(() => connectionView(available.value ? status.value : null));
+const agentVersion = computed(() => agentVersionView(status.value, appVersion, available.value));
 
 // ── 定时刷新 ────────────────────────────────────────────────
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -177,7 +179,10 @@ onUnmounted(() => clearInterval(timer));
         <span class="small-dot"></span> 本地服务托管 VPN
         <p>关闭窗口后，已启动的 VPN 可继续运行。</p>
       </div>
-      <footer>WINDOWS / LINUX <span>{{ appVersion }}</span></footer>
+      <footer>
+        客户端 {{ appVersion }}
+        <span :class="{ outdated: agentVersion.upgradeRequired }">Agent {{ agentVersion.label }}</span>
+      </footer>
     </aside>
 
     <!-- 主内容区 -->
@@ -199,6 +204,11 @@ onUnmounted(() => clearInterval(timer));
           错误代码：{{ shownError.code }}
           {{ shownError.retryable ? '· 可以重试' : '' }}
         </small>
+      </div>
+
+      <div v-if="agentVersion.upgradeRequired" class="version-warning" role="status">
+        <strong>本地 Agent 版本与客户端不一致</strong>
+        <small>当前 Agent：{{ agentVersion.label }}。请重新运行当前版本安装程序完成升级。</small>
       </div>
 
       <!-- VPN 状态卡片 -->
@@ -385,3 +395,24 @@ onUnmounted(() => clearInterval(timer));
     </main>
   </div>
 </template>
+
+<style scoped>
+footer .outdated {
+  color: #f2bd78;
+}
+
+.version-warning {
+  border: 1px solid #ead4a0;
+  background: #fff9e9;
+  border-radius: 9px;
+  color: #805f18;
+  padding: 13px 17px;
+  margin-bottom: 18px;
+  font-size: 12px;
+}
+
+.version-warning small {
+  display: block;
+  margin-top: 5px;
+}
+</style>

@@ -3,9 +3,10 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 export interface Failure { code: string; message: string; retryable: boolean }
 export interface Identity { sid: string; net_name: string; node_ip: string; node_id?: number|null; network_id?: number|null; access_code?: string|null }
 export type Phase = 'unconfigured'|'configuring'|'waiting_approval'|'stopped'|'starting'|'running'|'failed';
-export interface Status { phase: Phase; session: Identity|null; configured: Identity|null; process_running: boolean; connection: string; confirmation: string; stage: string; last_error: Failure|null }
+export interface Status { agent_version: string; phase: Phase; session: Identity|null; configured: Identity|null; process_running: boolean; connection: string; confirmation: string; stage: string; last_error: Failure|null }
 export interface LogEntry { time: number; message: string }
 export interface ConnectionView { label: string; detail: string }
+export interface AgentVersionView { label: string; upgradeRequired: boolean }
 export type Command = 'login'|'configure'|'rotate_key'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout';
 export const labels: Record<Phase,string> = { unconfigured:'未配置', configuring:'配置中', waiting_approval:'等待后台确认', stopped:'已停止', starting:'启动中', running:'进程运行中', failed:'操作失败' };
 export function connectionView(status: Status|null): ConnectionView {
@@ -13,6 +14,12 @@ export function connectionView(status: Status|null): ConnectionView {
   if (status?.connection === 'unreachable') return {label:'暂不可达',detail:'Tinc 仍在运行，Agent 将继续自动探测'};
   if (status?.process_running) return {label:'正在连接',detail:'Tinc 已运行，正在等待隧道握手与连通性验证'};
   return {label:'尚未验证',detail:'进程运行不代表 VPN 已连通'};
+}
+export function agentVersionView(status: Status|null, appVersion:string, available:boolean):AgentVersionView {
+  if (!available) return {label:'未连接',upgradeRequired:false};
+  const version=status?.agent_version?.trim();
+  if (!version) return {label:'旧版本',upgradeRequired:true};
+  return {label:version,upgradeRequired:version!==appVersion};
 }
 export function isHttpOrigin(value:string):boolean {
   return value.trim().toLowerCase().startsWith('http://');
