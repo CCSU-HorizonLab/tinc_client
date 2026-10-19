@@ -135,6 +135,14 @@ async function refresh(manual = false) {
 // ── 用户操作 ────────────────────────────────────────────────
 async function act(command: Command) {
   if (busy.value) return;
+  if (command === 'login' && agentVersion.value.upgradeRequired) {
+    error.value = {
+      code: 'agent_upgrade_required',
+      message: '本地 Agent 版本与客户端不一致，请先运行当前版本安装程序完成升级',
+      retryable: false,
+    };
+    return;
+  }
   const normalizedCode = normalizeAccessCode(accessCode.value);
   if (command === 'login' && !isValidAccessCode(normalizedCode)) {
     accessCode.value = normalizedCode;
@@ -318,7 +326,7 @@ onUnmounted(() => clearInterval(timer));
             </p>
             <button
               class="primary full"
-              :disabled="busy || !available || !serverValid || !accessCodeValid || !password || (httpServer && !allowHttp)"
+              :disabled="busy || !available || agentVersion.upgradeRequired || !serverValid || !accessCodeValid || !password || (httpServer && !allowHttp)"
             >
               {{ busy ? '操作处理中…' : status?.session ? '重新登录' : '登录节点' }}
               <span>→</span>
