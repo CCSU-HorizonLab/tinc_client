@@ -11,6 +11,7 @@ const clientInstaller=await readFile(resolve(root,'packaging/windows/install-cli
 const clientUninstaller=await readFile(resolve(root,'packaging/windows/uninstall-client.ps1'),'utf8');
 const installerHooks=await readFile(resolve(root,'packaging/windows/installer-hooks.nsh'),'utf8');
 const windowsBuild=await readFile(resolve(root,'scripts/build/windows.ps1'),'utf8');
+const phase2Preflight=await readFile(resolve(root,'scripts/test/phase2-preflight.ps1'),'utf8');
 const tauriConfig=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.conf.json'),'utf8'));
 const rootPackage=JSON.parse(await readFile(resolve(root,'package.json'),'utf8'));
 const desktopPackage=JSON.parse(await readFile(resolve(root,'apps/desktop/package.json'),'utf8'));
@@ -62,10 +63,15 @@ assert.equal(tauriConfig.bundle.windows.nsis.installMode,'perMachine','Driver/se
 assert.equal(tauriConfig.bundle.windows.nsis.installerHooks,'../../../packaging/windows/installer-hooks.nsh');
 for(const expected of ['vpn-agent.exe','tinc\\\\tincd.exe','COPYING.txt','tap-windows-9.24.7-I601-Win10.exe','payload-manifest.json','-VerifyOnly']) assert.match(windowsBuild,new RegExp(expected));
 assert.doesNotMatch(windowsBuild,/latest/i,'Build must use a pinned TAP-Windows artifact, not a moving latest URL');
+for(const forbidden of ['Stop-Service','Start-Service','New-NetRoute','Remove-NetRoute','Remove-NetAdapter','Disable-NetAdapter','Enable-NetAdapter','Copy-Item','Move-Item','Remove-Item']){
+  assert.doesNotMatch(phase2Preflight,new RegExp(forbidden),`Phase 2 preflight must remain read-only: ${forbidden}`);
+}
+assert.doesNotMatch(phase2Preflight,/Get-Content[^\r\n]*(settings|install-state|adapter-state|installer\.log)/i,'Preflight must not read configuration, credentials, keys, or log contents');
+for(const expected of ['upgrade_required','ready_for_upgrade','ready_for_vpn_test','Get-NetAdapter','Get-NetRoute','Get-Sha256']) assert.match(phase2Preflight,new RegExp(expected));
 
 if(process.platform==='win32'){
   const parser='$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseFile($env:TINC_CLIENT_SCRIPT,[ref]$tokens,[ref]$errors)|Out-Null;if($errors.Count){$errors|ForEach-Object{$_.ToString()};exit 1}';
-  for(const script of ['packaging/windows/install-agent.ps1','packaging/windows/install-client.ps1','packaging/windows/uninstall-client.ps1','scripts/build/windows.ps1']){
+  for(const script of ['packaging/windows/install-agent.ps1','packaging/windows/install-client.ps1','packaging/windows/uninstall-client.ps1','scripts/build/windows.ps1','scripts/test/phase2-preflight.ps1']){
     const parsed=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',parser],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,script)}});
     assert.equal(parsed.status,0,`${script}: ${parsed.stderr||parsed.stdout}`);
   }
@@ -124,6 +130,14 @@ try {
 }`;
   const rollbackRestoreCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',rollbackRestore],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,'packaging/windows/install-client.ps1')}});
   assert.equal(rollbackRestoreCheck.status,0,rollbackRestoreCheck.stderr||rollbackRestoreCheck.stdout);
+  const phase2Check=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve(root,'scripts/test/phase2-preflight.ps1')],{encoding:'utf8'});
+  assert.equal(phase2Check.status,0,phase2Check.stderr||phase2Check.stdout);
+  const phase2Report=JSON.parse(phase2Check.stdout);
+  assert.equal(phase2Report.schema_version,1);
+  assert.equal(phase2Report.client_version,rootPackage.version);
+  assert.equal(typeof phase2Report.upgrade_required,'boolean');
+  assert.equal(typeof phase2Report.ready_for_upgrade,'boolean');
+  assert.equal(typeof phase2Report.ready_for_vpn_test,'boolean');
 }
 if(process.platform!=='win32'){
   const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux/install-agent.sh')],{encoding:'utf8'});

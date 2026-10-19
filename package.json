@@ -11,6 +11,7 @@
     "desktop:build:windows": "powershell -NoProfile -File scripts/build/windows.ps1",
     "test:ui": "npm run test --workspace apps/desktop",
     "test:packaging": "node scripts/test/packaging-preflight.mjs",
+    "test:phase2-preflight": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/test/phase2-preflight.ps1",
     "test:linux": "powershell -NoProfile -File scripts/test/linux-container.ps1",
     "test:e2e": "node scripts/test/e2e-local.mjs"
   }
