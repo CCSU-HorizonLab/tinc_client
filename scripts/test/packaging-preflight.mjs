@@ -15,6 +15,7 @@ const phase2Preflight=await readFile(resolve(root,'scripts/test/phase2-preflight
 const tauriConfig=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.conf.json'),'utf8'));
 const rootPackage=JSON.parse(await readFile(resolve(root,'package.json'),'utf8'));
 const desktopPackage=JSON.parse(await readFile(resolve(root,'apps/desktop/package.json'),'utf8'));
+const desktopApp=await readFile(resolve(root,'apps/desktop/src/App.vue'),'utf8');
 const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
@@ -25,6 +26,9 @@ assert.equal(rootPackage.version,desktopPackage.version,'Root and desktop npm ve
 assert.equal(rootPackage.version,tauriConfig.version,'npm and Tauri bundle versions must match');
 assert.equal(rootPackage.version,cargoVersion,'UI, Agent, and Rust core versions must match');
 assert.notEqual(rootPackage.version,'0.1.0','Current development installer must not be confused with the old 0.1.0 package');
+assert.match(desktopApp,/import desktopPackage from '\.\.\/package\.json'/,'Desktop UI must read its displayed version from package metadata');
+assert.match(desktopApp,/<span>\{\{ appVersion \}\}<\/span>/,'Desktop footer must render the package version');
+assert.doesNotMatch(desktopApp,/<footer>[^\r\n]*\b\d+\.\d+\.\d+\b/,'Desktop footer must not hard-code a release version');
 
 for(const expected of ['TincSha256','Get-FileHash','-Algorithm SHA256','tinc version 1\\.0\\.36','Get-NetAdapter','TAP-Windows Adapter V9']) assert.match(windows,new RegExp(expected));
 assert.doesNotMatch(windows,/\$_\.Extension -eq '\.dll'/,'A single-file Tinc approval must not copy arbitrary DLLs');

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import desktopPackage from '../package.json';
 import {
   call,
   connectionView,
@@ -18,6 +19,7 @@ const server = ref('https://');
 const accessCode = ref('');
 const password = ref('');
 const allowHttp = ref(false);
+const appVersion = desktopPackage.version;
 
 function onAccessCodeBlur() {
   accessCode.value = accessCode.value.trim().toUpperCase();
@@ -175,7 +177,7 @@ onUnmounted(() => clearInterval(timer));
         <span class="small-dot"></span> 本地服务托管 VPN
         <p>关闭窗口后，已启动的 VPN 可继续运行。</p>
       </div>
-      <footer>WINDOWS / LINUX <span>0.1.0</span></footer>
+      <footer>WINDOWS / LINUX <span>{{ appVersion }}</span></footer>
     </aside>
 
     <!-- 主内容区 -->
