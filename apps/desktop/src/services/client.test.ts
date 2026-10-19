@@ -12,6 +12,8 @@ describe('failure recovery controls',()=>{
  it('rejects starting when the configured node address changed',()=>expect(controls({...status,configured:{...status.configured!,node_ip:'10.0.0.9'}},false).start).toBe(false));
  it('retains profile continuity when access code rotates for same node',()=>expect(controls({...status,session:{...status.session!,access_code:'TL-8H2P-9R3X'}},false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
  it('rejects starting a revoked profile',()=>expect(controls({...status,last_error:{code:'node_revoked',message:'revoked',retryable:false}},false).start).toBe(false));
+ it('blocks configuration and starting through an incompatible Agent',()=>expect(controls(status,false,false)).toEqual({configure:false,rotate:false,start:false,stop:false}));
+ it('still allows an incompatible Agent to stop a running VPN',()=>expect(controls({...status,phase:'running',process_running:true},false,false)).toEqual({configure:false,rotate:false,start:false,stop:true}));
  it('does not surface untrusted exception contents',()=>expect(failure('secret token')).toEqual({code:'desktop',message:'桌面接口调用失败，请检查本地服务并重试',retryable:true}));
 });
 describe('access code specification controls',()=>{

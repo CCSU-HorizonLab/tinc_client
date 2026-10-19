@@ -99,12 +99,14 @@ const available = ref(false);
 const refreshing = ref(false);
 
 // ── 派生计算 ────────────────────────────────────────────────
-const buttons = computed(() => controls(available.value ? status.value : null, busy.value));
 const identity = computed(() => status.value?.configured ?? status.value?.session);
 const shownError = computed(() => error.value ?? (available.value ? status.value?.last_error : null));
 const httpServer = computed(() => isHttpOrigin(server.value));
 const tunnel = computed(() => connectionView(available.value ? status.value : null));
 const agentVersion = computed(() => agentVersionView(status.value, appVersion, available.value));
+const buttons = computed(() =>
+  controls(available.value ? status.value : null, busy.value, !agentVersion.value.upgradeRequired),
+);
 
 // ── 定时刷新 ────────────────────────────────────────────────
 let timer: ReturnType<typeof setInterval> | undefined;

@@ -38,7 +38,7 @@ export async function call<T>(command: Command,args?:Record<string,unknown>):Pro
   if (!isTauri()) throw {code:'desktop_required',message:'当前为浏览器预览。请通过 Tauri 桌面应用连接本地服务；此处不模拟 VPN 数据。',retryable:false};
   return invoke<T>(command,args);
 }
-export function controls(status:Status|null,busy:boolean) {
+export function controls(status:Status|null,busy:boolean,agentCompatible=true) {
   const running=!!status?.process_running;
   const working=busy || status?.phase==='configuring' || status?.phase==='starting';
   const session=status?.session;
@@ -50,5 +50,6 @@ export function controls(status:Status|null,busy:boolean) {
     && session.node_id===configured.node_id
     && session.network_id===configured.network_id;
   const revoked=status?.last_error?.code==='node_revoked';
-  return {configure:!!session&&!running&&!working,rotate:sameProfile&&!revoked&&!running&&!working,start:sameProfile&&!revoked&&!running&&!working,stop:running&&!working};
+  const changesAllowed=agentCompatible&&!working;
+  return {configure:!!session&&!running&&changesAllowed,rotate:sameProfile&&!revoked&&!running&&changesAllowed,start:sameProfile&&!revoked&&!running&&changesAllowed,stop:running&&!working};
 }
