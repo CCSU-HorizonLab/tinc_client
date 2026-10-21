@@ -18,7 +18,11 @@ if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $projectRoot "target\release\bundle\nsis\Tinc Connect_${expectedVersion}_x64-setup.exe"
 }
 
-$agentRoot = Join-Path $env:ProgramFiles "TincClientAgent"
+$nativeProgramFiles = [Environment]::GetEnvironmentVariable("ProgramW6432")
+if ([string]::IsNullOrWhiteSpace($nativeProgramFiles)) {
+    $nativeProgramFiles = $env:ProgramFiles
+}
+$agentRoot = Join-Path $nativeProgramFiles "TincClientAgent"
 $installedAgentPath = Join-Path $agentRoot "vpn-agent.exe"
 $dataRoot = Join-Path $env:ProgramData "TincClient"
 $serviceName = "TincClientAgent"
@@ -98,6 +102,25 @@ function Get-StateFileSummary {
     }
 }
 
+function Get-UpgradeRequired {
+    param(
+        [Collections.IDictionary]$ExpectedAgent,
+        [Collections.IDictionary]$InstalledAgent
+    )
+
+    if ($InstalledAgent.exists -eq $false) {
+        return $true
+    }
+    $comparisonAvailable = $ExpectedAgent.exists -eq $true -and
+        $ExpectedAgent.accessible -eq $true -and
+        $InstalledAgent.exists -eq $true -and
+        $InstalledAgent.accessible -eq $true
+    if (-not $comparisonAvailable) {
+        return $null
+    }
+    return $ExpectedAgent.sha256 -ne $InstalledAgent.sha256
+}
+
 $expectedAgent = Get-FileSummary -Path $ExpectedAgentPath
 $installedAgent = Get-FileSummary -Path $installedAgentPath
 $installer = Get-FileSummary -Path $InstallerPath
@@ -161,14 +184,17 @@ try {
     $warnings.Add("Unable to read routes for the Tinc interface; retry in an elevated PowerShell.")
 }
 
-$hashMatches = $expectedAgent.exists -and $installedAgent.exists -and
-    $expectedAgent.sha256 -eq $installedAgent.sha256
+$upgradeRequired = Get-UpgradeRequired -ExpectedAgent $expectedAgent -InstalledAgent $installedAgent
+$hashMatches = $upgradeRequired -eq $false
+if ($null -eq $upgradeRequired) {
+    $warnings.Add("Unable to compare the installed Agent hash; upgrade requirement is unknown. Retry in an elevated PowerShell.")
+}
 $servicePathReady = $serviceSummary.exists -and $serviceSummary.path_matches
 $tapReady = $adapters.Count -eq 1 -and
     $adapters[0].description -match '^TAP-(Windows|Win32) Adapter V9'
 
 $report = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     collected_at_utc = (Get-Date).ToUniversalTime().ToString("o")
     client_version = $expectedVersion
     expected_agent = $expectedAgent
@@ -184,7 +210,7 @@ $report = [ordered]@{
         install_state = Get-StateFileSummary -Path (Join-Path $dataRoot "install-state.json")
         adapter_state = Get-StateFileSummary -Path (Join-Path $dataRoot "data\adapter-state.json")
     }
-    upgrade_required = -not $hashMatches
+    upgrade_required = $upgradeRequired
     ready_for_upgrade = $installer.exists -and $expectedAgent.exists -and $serviceQueryAvailable -and
         (-not $serviceSummary.exists -or $servicePathReady)
     ready_for_vpn_test = $hashMatches -and $servicePathReady -and

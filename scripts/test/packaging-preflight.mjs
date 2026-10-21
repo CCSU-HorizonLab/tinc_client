@@ -160,12 +160,32 @@ if (-not $actual.Equals([IO.Path]::GetFullPath($expected).TrimEnd('\\'),[StringC
     const nativePathCheck=spawnSync(powershellForNativePath,['-NoProfile','-NonInteractive','-Command',nativeProgramFiles],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,script)}});
     assert.equal(nativePathCheck.status,0,`${script}: ${nativePathCheck.stderr||nativePathCheck.stdout}`);
   }
+  const upgradeDecision=`
+Set-StrictMode -Version Latest
+$tokens=$null
+$errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:TINC_CLIENT_SCRIPT,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw $errors[0] }
+$functionAst=$ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-UpgradeRequired' },$true)
+if ($null -eq $functionAst) { throw 'Get-UpgradeRequired was not found.' }
+. ([scriptblock]::Create($functionAst.Extent.Text))
+$expected=[ordered]@{ exists=$true; accessible=$true; sha256='EXPECTED' }
+$missing=[ordered]@{ exists=$false; accessible=$true; sha256=$null }
+$inaccessible=[ordered]@{ exists=$null; accessible=$false; sha256=$null }
+$matching=[ordered]@{ exists=$true; accessible=$true; sha256='EXPECTED' }
+$different=[ordered]@{ exists=$true; accessible=$true; sha256='DIFFERENT' }
+if ((Get-UpgradeRequired -ExpectedAgent $expected -InstalledAgent $missing) -ne $true) { throw 'Missing Agent must require an upgrade.' }
+if ($null -ne (Get-UpgradeRequired -ExpectedAgent $expected -InstalledAgent $inaccessible)) { throw 'Inaccessible Agent must produce an unknown upgrade decision.' }
+if ((Get-UpgradeRequired -ExpectedAgent $expected -InstalledAgent $matching) -ne $false) { throw 'Matching Agent must not require an upgrade.' }
+if ((Get-UpgradeRequired -ExpectedAgent $expected -InstalledAgent $different) -ne $true) { throw 'Different Agent must require an upgrade.' }`;
+  const upgradeDecisionCheck=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-Command',upgradeDecision],{encoding:'utf8',env:{...process.env,TINC_CLIENT_SCRIPT:resolve(root,'scripts/test/phase2-preflight.ps1')}});
+  assert.equal(upgradeDecisionCheck.status,0,upgradeDecisionCheck.stderr||upgradeDecisionCheck.stdout);
   const phase2Check=spawnSync('powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',resolve(root,'scripts/test/phase2-preflight.ps1')],{encoding:'utf8'});
   assert.equal(phase2Check.status,0,phase2Check.stderr||phase2Check.stdout);
   const phase2Report=JSON.parse(phase2Check.stdout);
-  assert.equal(phase2Report.schema_version,1);
+  assert.equal(phase2Report.schema_version,2);
   assert.equal(phase2Report.client_version,rootPackage.version);
-  assert.equal(typeof phase2Report.upgrade_required,'boolean');
+  assert(phase2Report.upgrade_required===null||typeof phase2Report.upgrade_required==='boolean');
   assert.equal(typeof phase2Report.ready_for_upgrade,'boolean');
   assert.equal(typeof phase2Report.ready_for_vpn_test,'boolean');
 }
