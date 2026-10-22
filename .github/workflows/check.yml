@@ -33,4 +33,4 @@ jobs:
         name: Build Windows release binaries
         run: cargo build --locked --release -p vpn-agent -p tinc-desktop
       - if: runner.os == 'Linux'
-        run: npm run tauri --workspace apps/desktop -- build --bundles deb
+        run: npm run desktop:build:linux

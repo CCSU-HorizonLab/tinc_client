@@ -8,6 +8,7 @@
     "build": "npm run build --workspace apps/desktop",
     "desktop:dev": "npm run tauri --workspace apps/desktop -- dev",
     "desktop:build": "node scripts/build/desktop-build.mjs",
+    "desktop:build:linux": "node scripts/build/linux.mjs",
     "desktop:build:windows": "powershell -NoProfile -File scripts/build/windows.ps1",
     "test:ui": "npm run test --workspace apps/desktop",
     "test:packaging": "node scripts/test/packaging-preflight.mjs",
