@@ -73,6 +73,7 @@ if (contents.error || contents.status !== 0) {
 }
 for (const expected of [
   './usr/share/tinc-connect/payload/vpn-agent',
+  './usr/share/tinc-connect/payload/setup-agent.sh',
   './usr/share/tinc-connect/payload/install-agent.sh',
   './usr/share/tinc-connect/payload/uninstall-agent.sh',
   './usr/share/tinc-connect/payload/tinc-client-agent.service',

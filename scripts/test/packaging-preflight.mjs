@@ -19,6 +19,7 @@ const desktopPackage=JSON.parse(await readFile(resolve(root,'apps/desktop/packag
 const desktopApp=await readFile(resolve(root,'apps/desktop/src/App.vue'),'utf8');
 const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
+const linuxSetup=await readFile(resolve(root,'packaging/linux/setup-agent.sh'),'utf8');
 const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-installer-inputs.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
@@ -51,10 +52,13 @@ assert.match(linuxInstallerInputs,/Expected installer rejection/,'Linux installe
 const debFiles=linuxBundle.bundle?.linux?.deb?.files??{};
 for(const expected of [
   '/usr/share/tinc-connect/payload/vpn-agent',
+  '/usr/share/tinc-connect/payload/setup-agent.sh',
   '/usr/share/tinc-connect/payload/install-agent.sh',
   '/usr/share/tinc-connect/payload/uninstall-agent.sh',
   '/usr/share/tinc-connect/payload/tinc-client-agent.service'
 ]) assert.equal(typeof debFiles[expected],'string',`Linux DEB must include ${expected}`);
+for(const expected of ['PKEXEC_UID','SUDO_UID','Unable to identify the non-root desktop user',`exec /bin/sh "$installer" "$agent" "$owner_uid" tinc`])
+  assert.match(linuxSetup,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", 'Debian package is missing required payload'])
   assert.match(linuxBuild,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 assert.match(desktopCargo,/\[features\][\s\S]*default\s*=\s*\["custom-protocol"\][\s\S]*custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/,'Release desktop must embed frontend assets through Tauri custom protocol');
