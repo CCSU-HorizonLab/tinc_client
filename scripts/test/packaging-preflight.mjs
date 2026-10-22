@@ -20,6 +20,7 @@ const desktopApp=await readFile(resolve(root,'apps/desktop/src/App.vue'),'utf8')
 const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
+const ciWorkflow=await readFile(resolve(root,'.github/workflows/check.yml'),'utf8');
 
 const cargoVersion=workspaceCargo.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)?.[1];
 assert(cargoVersion,'Cargo workspace version is missing');
@@ -39,6 +40,7 @@ for(const expected of ['AGENT_BINARY must be an absolute path','tinc version 1\\
 assert(windows.indexOf('Get-NetAdapter')<windows.indexOf('New-Item -ItemType Directory'),'Windows preflight must run before creating protected install directories');
 assert(linux.indexOf('/dev/net/tun')<linux.indexOf('install -d -m 755'),'Linux preflight must run before installation writes');
 assert.match(desktopCargo,/\[features\][\s\S]*default\s*=\s*\["custom-protocol"\][\s\S]*custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/,'Release desktop must embed frontend assets through Tauri custom protocol');
+assert.match(ciWorkflow,/apt-get install[^\r\n]*\blibxdo-dev\b/,'Ubuntu CI must install the Linux desktop xdo development dependency');
 for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',
