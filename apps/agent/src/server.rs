@@ -80,7 +80,7 @@ pub async fn serve(
         };
         make_pipe(&sid, dev, true)?
     };
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let listener = make_socket(&settings, dev).await?;
 
     ready()?;
@@ -95,7 +95,7 @@ pub async fn serve(
                 std::mem::replace(&mut listener,next)
             }
         };
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let incoming = tokio::select! {
             _=shutdown.notified()=>break,
             result=listener.accept()=> {
@@ -147,7 +147,7 @@ pub async fn serve(
     while tasks.join_next().await.is_some() {}
     ticker.abort();
     engine.lock().await.stop().await?;
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     std::fs::remove_file(vpn_ipc::endpoint(dev)).map_err(Error::io)?;
     drop(lock);
     Ok(())
@@ -173,7 +173,7 @@ fn make_pipe(
     .map_err(Error::io)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 async fn make_socket(settings: &Settings, dev: bool) -> Result<tokio::net::UnixListener> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 

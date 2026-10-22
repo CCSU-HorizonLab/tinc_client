@@ -1,6 +1,9 @@
 mod server;
 mod service;
 
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("vpn-agent currently supports Windows and Linux only");
+
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::Notify;
 use vpn_core::*;

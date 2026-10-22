@@ -5,10 +5,11 @@ edition.workspace = true
 [dependencies]
 vpn-core = { path = "../../crates/vpn-core" }
 vpn-ipc = { path = "../../crates/vpn-ipc" }
-platform-windows = { path = "../../crates/platform-windows" }
-platform-linux = { path = "../../crates/platform-linux" }
 serde_json.workspace = true
 tokio.workspace = true
 fs2 = "0.4"
 [target.'cfg(windows)'.dependencies]
+platform-windows = { path = "../../crates/platform-windows" }
 windows-service = "0.8"
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { path = "../../crates/platform-linux" }

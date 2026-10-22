@@ -1,6 +1,9 @@
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use vpn_core::{Error, Reply, Request, Result};
+
+#[cfg(not(any(windows, target_os = "linux")))]
+compile_error!("vpn-ipc currently supports Windows and Linux desktop clients only");
 pub const MAX_FRAME: usize = 64 * 1024;
 pub fn development() -> bool {
     cfg!(debug_assertions) && std::env::var("TINC_CLIENT_DEV").as_deref() == Ok("1")
@@ -31,7 +34,7 @@ pub fn endpoint(dev: bool) -> String {
             r"\\.\pipe\tinc-client-v1".into()
         }
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         if dev {
             match development_instance() {
@@ -109,7 +112,7 @@ pub async fn call(request: Request) -> Result<Reply> {
                 .map_err(|_| Error::new("ipc_identity", "本地服务身份验证失败", false))?;
             pipe
         };
-        #[cfg(unix)]
+        #[cfg(target_os = "linux")]
         let mut stream = {
             let socket = tokio::net::UnixStream::connect(endpoint(dev))
                 .await

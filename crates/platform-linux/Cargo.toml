@@ -2,6 +2,6 @@
 name = "platform-linux"
 version.workspace = true
 edition.workspace = true
-[target.'cfg(unix)'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 tokio.workspace = true

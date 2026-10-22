@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 use std::{
     io,
     os::unix::{ffi::OsStrExt, fs::PermissionsExt},
