@@ -19,6 +19,7 @@ const desktopPackage=JSON.parse(await readFile(resolve(root,'apps/desktop/packag
 const desktopApp=await readFile(resolve(root,'apps/desktop/src/App.vue'),'utf8');
 const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
+const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-installer-inputs.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const ciWorkflow=await readFile(resolve(root,'.github/workflows/check.yml'),'utf8');
 
@@ -36,9 +37,15 @@ assert.doesNotMatch(desktopApp,/<footer>[^\r\n]*\b\d+\.\d+\.\d+\b/,'Desktop foot
 for(const expected of ['TincSha256','Get-FileHash','-Algorithm SHA256','tinc version 1\\.0\\.36','Get-NetAdapter','TAP-Windows Adapter V9']) assert.match(windows,new RegExp(expected));
 assert.doesNotMatch(windows,/\$_\.Extension -eq '\.dll'/,'A single-file Tinc approval must not copy arbitrary DLLs');
 assert.match(windows,/interface_prefix = 32/);
-for(const expected of ['AGENT_BINARY must be an absolute path','tinc version 1\\.0\\.36','test -x /usr/sbin/ip','iproute2','/dev/net/tun','"interface_prefix":32']) assert.match(linux,new RegExp(expected));
+for(const expected of [
+  'AGENT_BINARY must be an absolute path','OWNER_UID must identify a non-root desktop user',
+  'getent passwd','Linux interface names must not exceed 15 characters','tinc version 1\\.0\\.36',
+  'test -x /usr/sbin/ip','iproute2','test -x /usr/bin/ping','command -v systemctl','/dev/net/tun',
+  'Refusing symlinked installation directories','Existing systemd unit: refusing overwrite','"interface_prefix":32'
+]) assert.match(linux,new RegExp(expected));
 assert(windows.indexOf('Get-NetAdapter')<windows.indexOf('New-Item -ItemType Directory'),'Windows preflight must run before creating protected install directories');
 assert(linux.indexOf('/dev/net/tun')<linux.indexOf('install -d -m 755'),'Linux preflight must run before installation writes');
+assert.match(linuxInstallerInputs,/Expected installer rejection/,'Linux installer input regressions must remain covered in CI');
 assert.match(desktopCargo,/\[features\][\s\S]*default\s*=\s*\["custom-protocol"\][\s\S]*custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/,'Release desktop must embed frontend assets through Tauri custom protocol');
 assert.match(ciWorkflow,/apt-get install[^\r\n]*\blibxdo-dev\b/,'Ubuntu CI must install the Linux desktop xdo development dependency');
 assert.doesNotMatch(ciWorkflow,/npm run desktop:build:windows/,'Ordinary CI cannot build the offline installer without the approved external Tinc payload');

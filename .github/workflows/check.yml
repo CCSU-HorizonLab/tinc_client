@@ -21,6 +21,8 @@ jobs:
       - run: npm run build
       - run: npm run test:ui
       - run: npm run test:packaging
+      - if: runner.os == 'Linux'
+        run: sudo sh scripts/test/linux-installer-inputs.sh
       - run: cargo fmt --all --check
       - run: cargo test --locked --workspace --exclude tinc-desktop
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
