@@ -41,6 +41,8 @@ assert(windows.indexOf('Get-NetAdapter')<windows.indexOf('New-Item -ItemType Dir
 assert(linux.indexOf('/dev/net/tun')<linux.indexOf('install -d -m 755'),'Linux preflight must run before installation writes');
 assert.match(desktopCargo,/\[features\][\s\S]*default\s*=\s*\["custom-protocol"\][\s\S]*custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/,'Release desktop must embed frontend assets through Tauri custom protocol');
 assert.match(ciWorkflow,/apt-get install[^\r\n]*\blibxdo-dev\b/,'Ubuntu CI must install the Linux desktop xdo development dependency');
+assert.doesNotMatch(ciWorkflow,/npm run desktop:build:windows/,'Ordinary CI cannot build the offline installer without the approved external Tinc payload');
+assert.match(ciWorkflow,/runner\.os == 'Windows'[\s\S]*cargo build --locked --release -p vpn-agent -p tinc-desktop/,'Windows CI must still compile the release Agent and desktop binaries');
 for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',

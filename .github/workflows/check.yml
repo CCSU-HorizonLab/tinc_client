@@ -28,6 +28,7 @@ jobs:
       - run: cargo build --locked -p vpn-agent --example process_fixture
       - run: npm run test:e2e
       - if: runner.os == 'Windows'
-        run: npm run desktop:build:windows
+        name: Build Windows release binaries
+        run: cargo build --locked --release -p vpn-agent -p tinc-desktop
       - if: runner.os == 'Linux'
         run: npm run tauri --workspace apps/desktop -- build --bundles deb
