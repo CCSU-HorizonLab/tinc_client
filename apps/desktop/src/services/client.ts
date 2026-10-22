@@ -7,7 +7,8 @@ export interface Status { agent_version: string; phase: Phase; session: Identity
 export interface LogEntry { time: number; message: string }
 export interface ConnectionView { label: string; detail: string }
 export interface AgentVersionView { label: string; upgradeRequired: boolean }
-export type Command = 'login'|'configure'|'rotate_key'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout';
+export type DesktopPlatform = 'windows'|'linux'|'unknown';
+export type Command = 'login'|'configure'|'rotate_key'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout'|'get_platform'|'setup_linux_agent';
 export const labels: Record<Phase,string> = { unconfigured:'未配置', configuring:'配置中', waiting_approval:'等待后台确认', stopped:'已停止', starting:'启动中', running:'进程运行中', failed:'操作失败' };
 export function connectionView(status: Status|null): ConnectionView {
   if (status?.connection === 'connected') return {label:'已验证连通',detail:'服务端 VPN 节点可经专用 TAP 路由到达'};
@@ -20,6 +21,9 @@ export function agentVersionView(status: Status|null, appVersion:string, availab
   const version=status?.agent_version?.trim();
   if (!version) return {label:'旧版本',upgradeRequired:true};
   return {label:version,upgradeRequired:version!==appVersion};
+}
+export function canSetupAgent(platform:DesktopPlatform,available:boolean,error:Failure|null):boolean {
+  return platform==='linux'&&!available&&error?.code==='agent_unavailable';
 }
 export function isHttpOrigin(value:string):boolean {
   return value.trim().toLowerCase().startsWith('http://');

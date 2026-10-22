@@ -24,6 +24,7 @@ const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-insta
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
 const linuxBuild=await readFile(resolve(root,'scripts/build/linux.mjs'),'utf8');
+const desktopRust=await readFile(resolve(root,'apps/desktop/src-tauri/src/main.rs'),'utf8');
 const ciWorkflow=await readFile(resolve(root,'.github/workflows/check.yml'),'utf8');
 
 const cargoVersion=workspaceCargo.match(/\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/)?.[1];
@@ -61,6 +62,8 @@ for(const expected of ['PKEXEC_UID','SUDO_UID','Unable to identify the non-root 
   assert.match(linuxSetup,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", 'Debian package is missing required payload'])
   assert.match(linuxBuild,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+for(const expected of ['/usr/bin/pkexec','/usr/share/tinc-connect/payload/setup-agent.sh','metadata.uid() == 0','mode() & 0o022 == 0','unsupported_platform_action'])
+  assert.match(desktopRust,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 assert.match(desktopCargo,/\[features\][\s\S]*default\s*=\s*\["custom-protocol"\][\s\S]*custom-protocol\s*=\s*\["tauri\/custom-protocol"\]/,'Release desktop must embed frontend assets through Tauri custom protocol');
 assert.match(ciWorkflow,/apt-get install[^\r\n]*\blibxdo-dev\b/,'Ubuntu CI must install the Linux desktop xdo development dependency');
 assert.doesNotMatch(ciWorkflow,/npm run desktop:build:windows/,'Ordinary CI cannot build the offline installer without the approved external Tinc payload');

@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import desktopPackage from '../package.json';
 import {
   agentVersionView,
+  canSetupAgent,
   call,
   connectionView,
   controls,
@@ -13,6 +14,7 @@ import {
   labels,
   normalizeAccessCode,
   type Command,
+  type DesktopPlatform,
   type Failure,
   type LogEntry,
   type Status,
@@ -100,6 +102,7 @@ function handleLogRightClick(e: MouseEvent) {
 const busy = ref(false);
 const available = ref(false);
 const refreshing = ref(false);
+const platform = ref<DesktopPlatform>('unknown');
 
 // ── 派生计算 ────────────────────────────────────────────────
 const identity = computed(() => status.value?.configured ?? status.value?.session);
@@ -112,6 +115,7 @@ const agentVersion = computed(() => agentVersionView(status.value, appVersion, a
 const buttons = computed(() =>
   controls(available.value ? status.value : null, busy.value, !agentVersion.value.upgradeRequired),
 );
+const showAgentSetup = computed(() => canSetupAgent(platform.value, available.value, shownError.value ?? null));
 
 // ── 定时刷新 ────────────────────────────────────────────────
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -193,7 +197,24 @@ async function act(command: Command) {
   }
 }
 
+async function setupAgent() {
+  if (busy.value || !showAgentSetup.value) return;
+  busy.value = true;
+  error.value = null;
+  try {
+    await call<void>('setup_linux_agent');
+  } catch (e) {
+    error.value = failure(e);
+  } finally {
+    busy.value = false;
+    await refresh(true);
+  }
+}
+
 onMounted(() => {
+  void call<DesktopPlatform>('get_platform')
+    .then((value) => { platform.value = value; })
+    .catch(() => { platform.value = 'unknown'; });
   void refresh();
   timer = setInterval(() => void refresh(), 2000);
 });
@@ -244,6 +265,9 @@ onUnmounted(() => clearInterval(timer));
           错误代码：{{ shownError.code }}
           {{ shownError.retryable ? '· 可以重试' : '' }}
         </small>
+        <button v-if="showAgentSetup" class="subtle" :disabled="busy" @click="setupAgent">
+          {{ busy ? '正在等待系统授权…' : '安装并启动 Linux 本地服务' }}
+        </button>
       </div>
 
       <div v-if="agentVersion.upgradeRequired" class="version-warning" role="status">
