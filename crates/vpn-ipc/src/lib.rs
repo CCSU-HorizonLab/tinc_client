@@ -85,11 +85,18 @@ pub async fn write_frame<T: serde::Serialize>(
     result.map_err(|_: std::io::Error| ipc_error())
 }
 fn ipc_error() -> Error {
-    Error::new(
-        "agent_unavailable",
-        "无法连接本地服务，或服务连接中断；请检查服务安装及当前用户权限",
-        true,
-    )
+    #[cfg(windows)]
+    let message = "无法连接本地 Agent；请确认 Tinc Client Agent Windows 服务已安装并正在运行，当前用户与安装时授权用户一致";
+    #[cfg(target_os = "linux")]
+    let message = "无法连接本地 Agent；请确认 tinc-client-agent systemd 服务已启动，当前用户 UID 与 /etc/tinc-client/settings.json 中 owner 一致";
+    Error::new("agent_unavailable", message, true)
+}
+fn ipc_identity_error() -> Error {
+    #[cfg(windows)]
+    let message = "本地 Agent 身份验证失败；服务进程必须由 LocalSystem 运行，请重新运行当前版本安装程序修复服务";
+    #[cfg(target_os = "linux")]
+    let message = "本地 Agent 身份验证失败；生产 socket 必须由 root Agent 创建，请检查 systemd 服务和 socket 权限";
+    Error::new("ipc_identity", message, false)
 }
 pub async fn call(request: Request) -> Result<Reply> {
     tokio::time::timeout(Duration::from_secs(150), async {
@@ -109,7 +116,7 @@ pub async fn call(request: Request) -> Result<Reply> {
                 }
             };
             unsafe { platform_windows::verify_server(pipe.as_raw_handle(), dev) }
-                .map_err(|_| Error::new("ipc_identity", "本地服务身份验证失败", false))?;
+                .map_err(|_| ipc_identity_error())?;
             pipe
         };
         #[cfg(target_os = "linux")]
@@ -118,7 +125,7 @@ pub async fn call(request: Request) -> Result<Reply> {
                 .await
                 .map_err(|_| ipc_error())?;
             platform_linux::verify_peer(&socket, if dev { platform_linux::uid() } else { 0 })
-                .map_err(|_| Error::new("ipc_identity", "本地服务身份验证失败", false))?;
+                .map_err(|_| ipc_identity_error())?;
             socket
         };
         write_frame(&mut stream, &request).await?;
@@ -132,4 +139,31 @@ pub async fn call(request: Request) -> Result<Reply> {
             true,
         )
     })?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ipc_error, ipc_identity_error};
+
+    #[test]
+    fn platform_connection_error_is_actionable() {
+        let error = ipc_error();
+        assert_eq!(error.code, "agent_unavailable");
+        assert!(error.retryable);
+        #[cfg(windows)]
+        assert!(error.message.contains("Windows 服务"));
+        #[cfg(target_os = "linux")]
+        assert!(error.message.contains("systemd 服务"));
+    }
+
+    #[test]
+    fn platform_identity_error_is_actionable_and_not_retryable() {
+        let error = ipc_identity_error();
+        assert_eq!(error.code, "ipc_identity");
+        assert!(!error.retryable);
+        #[cfg(windows)]
+        assert!(error.message.contains("LocalSystem"));
+        #[cfg(target_os = "linux")]
+        assert!(error.message.contains("root Agent"));
+    }
 }
