@@ -20,6 +20,7 @@ const desktopApp=await readFile(resolve(root,'apps/desktop/src/App.vue'),'utf8')
 const workspaceCargo=await readFile(resolve(root,'Cargo.toml'),'utf8');
 const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf8');
 const linuxSetup=await readFile(resolve(root,'packaging/linux/setup-agent.sh'),'utf8');
+const linuxUpgrade=await readFile(resolve(root,'packaging/linux/upgrade-agent.sh'),'utf8');
 const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-installer-inputs.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
@@ -55,11 +56,15 @@ for(const expected of [
   '/usr/share/tinc-connect/payload/vpn-agent',
   '/usr/share/tinc-connect/payload/setup-agent.sh',
   '/usr/share/tinc-connect/payload/install-agent.sh',
+  '/usr/share/tinc-connect/payload/upgrade-agent.sh',
   '/usr/share/tinc-connect/payload/uninstall-agent.sh',
   '/usr/share/tinc-connect/payload/tinc-client-agent.service'
 ]) assert.equal(typeof debFiles[expected],'string',`Linux DEB must include ${expected}`);
 for(const expected of ['PKEXEC_UID','SUDO_UID','Unable to identify the non-root desktop user',`exec /bin/sh "$installer" "$agent" "$owner_uid" tinc`])
   assert.match(linuxSetup,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+for(const expected of ['restore_previous','upgrade_started=1','upgrade_succeeded=1','systemctl stop tinc-client-agent.service','systemctl is-active --quiet tinc-client-agent.service','Existing settings, profiles and keys were retained'])
+  assert.match(linuxUpgrade,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+assert(linuxUpgrade.indexOf('install -m 755 "$agent_target" "$backup_dir/vpn-agent"')<linuxUpgrade.indexOf('systemctl stop tinc-client-agent.service'),'Linux upgrade must back up the Agent before stopping or replacing it');
 for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", 'Debian package is missing required payload'])
   assert.match(linuxBuild,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ['/usr/bin/pkexec','/usr/share/tinc-connect/payload/setup-agent.sh','metadata.uid() == 0','mode() & 0o022 == 0','unsupported_platform_action'])
@@ -220,7 +225,9 @@ if ((Get-UpgradeRequired -ExpectedAgent $expected -InstalledAgent $different) -n
   assert.equal(typeof phase2Report.ready_for_vpn_test,'boolean');
 }
 if(process.platform!=='win32'){
-  const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux/install-agent.sh')],{encoding:'utf8'});
-  assert.equal(parsed.status,0,parsed.stderr||parsed.stdout);
+  for(const script of ['install-agent.sh','setup-agent.sh','upgrade-agent.sh','uninstall-agent.sh']){
+    const parsed=spawnSync('sh',['-n',resolve(root,'packaging/linux',script)],{encoding:'utf8'});
+    assert.equal(parsed.status,0,parsed.stderr||parsed.stdout);
+  }
 }
 console.log('PASS installer preflight guards and Windows PowerShell syntax');

@@ -48,6 +48,11 @@ mod linux_setup {
             false,
         )?;
         verify_root_owned(
+            Path::new("/usr/share/tinc-connect/payload/upgrade-agent.sh"),
+            false,
+            false,
+        )?;
+        verify_root_owned(
             Path::new("/usr/share/tinc-connect/payload/tinc-client-agent.service"),
             false,
             false,

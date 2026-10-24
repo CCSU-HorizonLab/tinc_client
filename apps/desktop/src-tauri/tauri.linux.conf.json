@@ -8,6 +8,7 @@
           "/usr/share/tinc-connect/payload/vpn-agent": "../../../.runtime/build/linux-payload/vpn-agent",
           "/usr/share/tinc-connect/payload/setup-agent.sh": "../../../packaging/linux/setup-agent.sh",
           "/usr/share/tinc-connect/payload/install-agent.sh": "../../../packaging/linux/install-agent.sh",
+          "/usr/share/tinc-connect/payload/upgrade-agent.sh": "../../../packaging/linux/upgrade-agent.sh",
           "/usr/share/tinc-connect/payload/uninstall-agent.sh": "../../../packaging/linux/uninstall-agent.sh",
           "/usr/share/tinc-connect/payload/tinc-client-agent.service": "../../../packaging/linux/tinc-client-agent.service"
         }

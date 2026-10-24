@@ -3,6 +3,7 @@ set -eu
 
 installer=$(CDPATH= cd -P "$(dirname "$0")/../.." && pwd)/packaging/linux/install-agent.sh
 setup=$(CDPATH= cd -P "$(dirname "$0")/../.." && pwd)/packaging/linux/setup-agent.sh
+upgrader=$(CDPATH= cd -P "$(dirname "$0")/../.." && pwd)/packaging/linux/upgrade-agent.sh
 
 test "$(id -u)" = 0 || { echo 'Run this non-mutating input test via sudo.' >&2; exit 1; }
 command -v getent >/dev/null 2>&1 || { echo 'getent is required to select a test owner UID.' >&2; exit 1; }
@@ -44,6 +45,15 @@ expect_failure 'OWNER_UID must identify a non-root desktop user' /does/not/exist
 expect_failure 'OWNER_UID does not identify a local user' /does/not/exist 4294967294 tinc
 expect_failure 'Invalid interface name' /does/not/exist "$owner_uid" 'bad/name'
 expect_failure 'Linux interface names must not exceed 15 characters' /does/not/exist "$owner_uid" tinc_interface_too_long
+
+if output=$(/bin/sh "$upgrader" relative-agent 2>&1); then
+    echo 'Expected upgrader to reject a relative Agent path' >&2
+    exit 1
+fi
+case "$output" in
+    *'AGENT_BINARY must be an absolute path'*) ;;
+    *) echo "Unexpected upgrader rejection: $output" >&2; exit 1;;
+esac
 
 if output=$(env -u SUDO_UID -u PKEXEC_UID /bin/sh "$setup" 2>&1); then
     echo 'Expected setup wrapper to reject a missing desktop user UID' >&2
