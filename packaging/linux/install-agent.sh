@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 # sudo ./install-agent.sh /absolute/path/vpn-agent INTERACTIVE_UID INTERFACE
+agent_root=/usr/local/lib/tinc-client
+config_root=/etc/tinc-client
+unit_root=/etc/systemd/system
+state_root=/var/lib/tinc-client
+agent_target="$agent_root/vpn-agent"
+settings_target="$config_root/settings.json"
+unit_target="$unit_root/tinc-client-agent.service"
+
 test "$(id -u)" = 0 || { echo 'Run via sudo.' >&2; exit 1; }
 test "$#" = 3 || { echo 'Usage: install-agent.sh AGENT_BINARY OWNER_UID INTERFACE' >&2; exit 1; }
 case "$1" in /*) ;; *) echo 'AGENT_BINARY must be an absolute path' >&2; exit 1;; esac
@@ -23,16 +31,34 @@ printf '%s\n' "$ip_version" | grep -qi 'iproute2' || { echo '/usr/sbin/ip is not
 test -x /usr/bin/ping || { echo 'iputils-ping is required at /usr/bin/ping.' >&2; exit 1; }
 command -v systemctl >/dev/null 2>&1 || { echo 'systemd is required to install the Agent service.' >&2; exit 1; }
 test -c /dev/net/tun && test -r /dev/net/tun && test -w /dev/net/tun || { echo 'A readable and writable /dev/net/tun device is required.' >&2; exit 1; }
-test ! -L /usr/local/lib/tinc-client && test ! -L /etc/tinc-client && test ! -L /var/lib/tinc-client || { echo 'Refusing symlinked installation directories.' >&2; exit 1; }
-test ! -e /etc/tinc-client/settings.json && test ! -L /etc/tinc-client/settings.json || { echo 'Existing settings: refusing overwrite.' >&2; exit 1; }
-test ! -e /usr/local/lib/tinc-client/vpn-agent && test ! -L /usr/local/lib/tinc-client/vpn-agent || { echo 'Existing binary: refusing overwrite.' >&2; exit 1; }
-test ! -e /etc/systemd/system/tinc-client-agent.service && test ! -L /etc/systemd/system/tinc-client-agent.service || { echo 'Existing systemd unit: refusing overwrite.' >&2; exit 1; }
-install -d -m 755 /usr/local/lib/tinc-client
-install -d -m 700 /etc/tinc-client /var/lib/tinc-client
-install -m 755 "$1" /usr/local/lib/tinc-client/vpn-agent
-printf '{"data_dir":"/var/lib/tinc-client","tinc_binary":"/usr/sbin/tincd","owner":"%s","interface":"%s","interface_prefix":32}\n' "$2" "$3" > /etc/tinc-client/settings.json
-chmod 600 /etc/tinc-client/settings.json
-install -m 644 "$unit_source" /etc/systemd/system/tinc-client-agent.service
+test ! -L "$agent_root" && test ! -L "$config_root" && test ! -L "$state_root" || { echo 'Refusing symlinked installation directories.' >&2; exit 1; }
+test ! -e "$settings_target" && test ! -L "$settings_target" || { echo 'Existing settings: refusing overwrite.' >&2; exit 1; }
+test ! -e "$agent_target" && test ! -L "$agent_target" || { echo 'Existing binary: refusing overwrite.' >&2; exit 1; }
+test ! -e "$unit_target" && test ! -L "$unit_target" || { echo 'Existing systemd unit: refusing overwrite.' >&2; exit 1; }
+
+install_started=0
+install_succeeded=0
+rollback_install() {
+    status=$?
+    trap - EXIT HUP INT TERM
+    if test "$install_started" = 1 && test "$install_succeeded" = 0; then
+        systemctl disable --now tinc-client-agent.service >/dev/null 2>&1 || true
+        rm -f "$agent_target" "$settings_target" "$unit_target"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    exit "$status"
+}
+trap rollback_install EXIT HUP INT TERM
+
+install_started=1
+install -d -m 755 "$agent_root"
+install -d -m 700 "$config_root" "$state_root"
+install -m 755 "$1" "$agent_target"
+printf '{"data_dir":"%s","tinc_binary":"/usr/sbin/tincd","owner":"%s","interface":"%s","interface_prefix":32}\n' "$state_root" "$2" "$3" > "$settings_target"
+chmod 600 "$settings_target"
+install -m 644 "$unit_source" "$unit_target"
 systemctl daemon-reload
 systemctl enable --now tinc-client-agent.service
 systemctl is-active --quiet tinc-client-agent.service
+install_succeeded=1
+trap - EXIT HUP INT TERM

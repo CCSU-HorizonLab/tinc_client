@@ -24,6 +24,8 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo sh scripts/test/linux-installer-inputs.sh
       - if: runner.os == 'Linux'
+        run: sudo sh scripts/test/linux-install-rollback.sh
+      - if: runner.os == 'Linux'
         run: sudo sh scripts/test/linux-upgrade-rollback.sh
       - run: cargo fmt --all --check
       - run: cargo test --locked --workspace --exclude tinc-desktop
