@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import desktopPackage from '../package.json';
 import {
   agentVersionView,
-  canSetupAgent,
+  agentSetupMode,
   call,
   connectionView,
   controls,
@@ -115,7 +115,12 @@ const agentVersion = computed(() => agentVersionView(status.value, appVersion, a
 const buttons = computed(() =>
   controls(available.value ? status.value : null, busy.value, !agentVersion.value.upgradeRequired),
 );
-const showAgentSetup = computed(() => canSetupAgent(platform.value, available.value, shownError.value ?? null));
+const setupMode = computed(() => agentSetupMode(
+  platform.value,
+  available.value,
+  shownError.value ?? null,
+  agentVersion.value.upgradeRequired,
+));
 
 // ── 定时刷新 ────────────────────────────────────────────────
 let timer: ReturnType<typeof setInterval> | undefined;
@@ -198,7 +203,7 @@ async function act(command: Command) {
 }
 
 async function setupAgent() {
-  if (busy.value || !showAgentSetup.value) return;
+  if (busy.value || !setupMode.value) return;
   busy.value = true;
   error.value = null;
   try {
@@ -265,14 +270,20 @@ onUnmounted(() => clearInterval(timer));
           错误代码：{{ shownError.code }}
           {{ shownError.retryable ? '· 可以重试' : '' }}
         </small>
-        <button v-if="showAgentSetup" class="subtle" :disabled="busy" @click="setupAgent">
+        <button v-if="setupMode === 'install'" class="subtle" :disabled="busy" @click="setupAgent">
           {{ busy ? '正在等待系统授权…' : '安装并启动 Linux 本地服务' }}
         </button>
       </div>
 
       <div v-if="agentVersion.upgradeRequired" class="version-warning" role="status">
         <strong>本地 Agent 版本与客户端不一致</strong>
-        <small>当前 Agent：{{ agentVersion.label }}。请重新运行当前版本安装程序完成升级。</small>
+        <small>
+          当前 Agent：{{ agentVersion.label }}。
+          {{ platform === 'linux' ? '请通过系统授权升级本地服务。' : '请重新运行当前版本安装程序完成升级。' }}
+        </small>
+        <button v-if="setupMode === 'upgrade'" class="subtle" :disabled="busy" @click="setupAgent">
+          {{ busy ? '正在等待系统授权…' : '升级 Linux 本地服务' }}
+        </button>
       </div>
 
       <!-- VPN 状态卡片 -->

@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 
-import {agentVersionView,canSetupAgent,connectionView,controls,failure,isHttpOrigin,isValidAccessCode,isValidServerOrigin,normalizeAccessCode,type Status} from './client';
+import {agentSetupMode,agentVersionView,connectionView,controls,failure,isHttpOrigin,isValidAccessCode,isValidServerOrigin,normalizeAccessCode,type Status} from './client';
 const status:Status={agent_version:'0.1.1',phase:'failed',session:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},configured:{sid:'n',net_name:'net',node_ip:'10.0.0.2',node_id:101,network_id:11,access_code:'TL-7K9M-2Q4F'},process_running:false,connection:'unknown',confirmation:'unavailable',stage:'',last_error:null};
 describe('failure recovery controls',()=>{
  it('allows retry and starting retained config only for the logged-in profile',()=>expect(controls(status,false)).toEqual({configure:true,rotate:true,start:true,stop:false}));
@@ -58,11 +58,15 @@ describe('agent version status',()=>{
  it('does not report an upgrade while the Agent is unavailable',()=>expect(agentVersionView(null,'0.1.1',false)).toEqual({label:'未连接',upgradeRequired:false}));
 });
 describe('platform Agent setup',()=>{
- it('offers setup only for a missing Linux Agent',()=>{
+ it('offers install only for a missing Linux Agent',()=>{
   const unavailable={code:'agent_unavailable',message:'missing',retryable:true};
-  expect(canSetupAgent('linux',false,unavailable)).toBe(true);
-  expect(canSetupAgent('windows',false,unavailable)).toBe(false);
-  expect(canSetupAgent('linux',true,unavailable)).toBe(false);
-  expect(canSetupAgent('linux',false,{...unavailable,code:'ipc_identity'})).toBe(false);
+  expect(agentSetupMode('linux',false,unavailable,false)).toBe('install');
+  expect(agentSetupMode('windows',false,unavailable,false)).toBeNull();
+  expect(agentSetupMode('linux',false,{...unavailable,code:'ipc_identity'},false)).toBeNull();
+ });
+ it('offers upgrade only for a connected outdated Linux Agent',()=>{
+  expect(agentSetupMode('linux',true,null,true)).toBe('upgrade');
+  expect(agentSetupMode('linux',true,null,false)).toBeNull();
+  expect(agentSetupMode('windows',true,null,true)).toBeNull();
  });
 });

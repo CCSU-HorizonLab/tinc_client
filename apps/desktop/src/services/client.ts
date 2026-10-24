@@ -8,6 +8,7 @@ export interface LogEntry { time: number; message: string }
 export interface ConnectionView { label: string; detail: string }
 export interface AgentVersionView { label: string; upgradeRequired: boolean }
 export type DesktopPlatform = 'windows'|'linux'|'unknown';
+export type AgentSetupMode = 'install'|'upgrade'|null;
 export type Command = 'login'|'configure'|'rotate_key'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout'|'get_platform'|'setup_linux_agent';
 export const labels: Record<Phase,string> = { unconfigured:'未配置', configuring:'配置中', waiting_approval:'等待后台确认', stopped:'已停止', starting:'启动中', running:'进程运行中', failed:'操作失败' };
 export function connectionView(status: Status|null): ConnectionView {
@@ -22,8 +23,11 @@ export function agentVersionView(status: Status|null, appVersion:string, availab
   if (!version) return {label:'旧版本',upgradeRequired:true};
   return {label:version,upgradeRequired:version!==appVersion};
 }
-export function canSetupAgent(platform:DesktopPlatform,available:boolean,error:Failure|null):boolean {
-  return platform==='linux'&&!available&&error?.code==='agent_unavailable';
+export function agentSetupMode(platform:DesktopPlatform,available:boolean,error:Failure|null,upgradeRequired:boolean):AgentSetupMode {
+  if (platform!=='linux') return null;
+  if (!available&&error?.code==='agent_unavailable') return 'install';
+  if (available&&upgradeRequired) return 'upgrade';
+  return null;
 }
 export function isHttpOrigin(value:string):boolean {
   return value.trim().toLowerCase().startsWith('http://');
