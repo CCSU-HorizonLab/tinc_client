@@ -24,6 +24,8 @@ const linuxUpgrade=await readFile(resolve(root,'packaging/linux/upgrade-agent.sh
 const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-installer-inputs.sh'),'utf8');
 const linuxInstallRollback=await readFile(resolve(root,'scripts/test/linux-install-rollback.sh'),'utf8');
 const linuxUpgradeRollback=await readFile(resolve(root,'scripts/test/linux-upgrade-rollback.sh'),'utf8');
+const linuxUninstall=await readFile(resolve(root,'packaging/linux/uninstall-agent.sh'),'utf8');
+const linuxUninstallOwnership=await readFile(resolve(root,'scripts/test/linux-uninstall-ownership.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
 const linuxBuild=await readFile(resolve(root,'scripts/build/linux.mjs'),'utf8');
@@ -55,6 +57,7 @@ assert(linux.indexOf('/dev/net/tun')<linux.indexOf('install -d -m 755'),'Linux p
 assert.match(linuxInstallerInputs,/Expected installer rejection/,'Linux installer input regressions must remain covered in CI');
 assert.match(linuxInstallRollback,/Install rollback left a managed file/,'Linux partial-install rollback must remain covered in CI');
 assert.match(linuxUpgradeRollback,/Rollback did not restore the old Agent/,'Linux upgrade rollback must remain covered in CI');
+assert.match(linuxUninstallOwnership,/Untrusted Agent service reached systemctl/,'Linux uninstall ownership checks must remain covered in CI');
 const debFiles=linuxBundle.bundle?.linux?.deb?.files??{};
 for(const expected of [
   '/usr/share/tinc-connect/payload/vpn-agent',
@@ -69,6 +72,8 @@ for(const expected of ['PKEXEC_UID','SUDO_UID','Unable to identify the non-root 
 for(const expected of ['restore_previous','upgrade_started=1','upgrade_succeeded=1','systemctl stop tinc-client-agent.service','systemctl is-active --quiet tinc-client-agent.service','Existing settings, profiles and keys were retained'])
   assert.match(linuxUpgrade,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 assert(linuxUpgrade.indexOf('install -m 755 "$agent_target" "$backup_dir/vpn-agent"')<linuxUpgrade.indexOf('systemctl stop tinc-client-agent.service'),'Linux upgrade must back up the Agent before stopping or replacing it');
+for(const expected of ['stat -c %u','-perm /022','grep -Fxc "ExecStart=$agent_target"','systemctl disable --now tinc-client-agent.service'])
+  assert.match(linuxUninstall,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", 'Debian package is missing required payload'])
   assert.match(linuxBuild,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ['/usr/bin/pkexec','/usr/share/tinc-connect/payload/setup-agent.sh','metadata.uid() == 0','mode() & 0o022 == 0','unsupported_platform_action'])
@@ -80,6 +85,7 @@ assert.match(ciWorkflow,/runner\.os == 'Windows'[\s\S]*cargo build --locked --re
 assert.match(ciWorkflow,/runner\.os == 'Linux'[\s\S]*npm run desktop:build:linux/,'Linux CI must build the DEB with its Agent payload');
 assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-install-rollback\.sh/,'Linux CI must execute the isolated Agent install rollback test');
 assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-upgrade-rollback\.sh/,'Linux CI must execute the isolated Agent rollback test');
+assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-uninstall-ownership\.sh/,'Linux CI must execute the isolated Agent uninstall ownership test');
 for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',
