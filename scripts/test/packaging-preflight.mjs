@@ -22,6 +22,7 @@ const linux=await readFile(resolve(root,'packaging/linux/install-agent.sh'),'utf
 const linuxSetup=await readFile(resolve(root,'packaging/linux/setup-agent.sh'),'utf8');
 const linuxUpgrade=await readFile(resolve(root,'packaging/linux/upgrade-agent.sh'),'utf8');
 const linuxInstallerInputs=await readFile(resolve(root,'scripts/test/linux-installer-inputs.sh'),'utf8');
+const linuxUpgradeRollback=await readFile(resolve(root,'scripts/test/linux-upgrade-rollback.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
 const linuxBuild=await readFile(resolve(root,'scripts/build/linux.mjs'),'utf8');
@@ -51,6 +52,7 @@ for(const expected of [
 assert(windows.indexOf('Get-NetAdapter')<windows.indexOf('New-Item -ItemType Directory'),'Windows preflight must run before creating protected install directories');
 assert(linux.indexOf('/dev/net/tun')<linux.indexOf('install -d -m 755'),'Linux preflight must run before installation writes');
 assert.match(linuxInstallerInputs,/Expected installer rejection/,'Linux installer input regressions must remain covered in CI');
+assert.match(linuxUpgradeRollback,/Rollback did not restore the old Agent/,'Linux upgrade rollback must remain covered in CI');
 const debFiles=linuxBundle.bundle?.linux?.deb?.files??{};
 for(const expected of [
   '/usr/share/tinc-connect/payload/vpn-agent',
@@ -74,6 +76,7 @@ assert.match(ciWorkflow,/apt-get install[^\r\n]*\blibxdo-dev\b/,'Ubuntu CI must 
 assert.doesNotMatch(ciWorkflow,/npm run desktop:build:windows/,'Ordinary CI cannot build the offline installer without the approved external Tinc payload');
 assert.match(ciWorkflow,/runner\.os == 'Windows'[\s\S]*cargo build --locked --release -p vpn-agent -p tinc-desktop/,'Windows CI must still compile the release Agent and desktop binaries');
 assert.match(ciWorkflow,/runner\.os == 'Linux'[\s\S]*npm run desktop:build:linux/,'Linux CI must build the DEB with its Agent payload');
+assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-upgrade-rollback\.sh/,'Linux CI must execute the isolated Agent rollback test');
 for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',

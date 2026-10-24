@@ -1,10 +1,13 @@
 #!/bin/sh
 set -eu
 
-agent_target=/usr/local/lib/tinc-client/vpn-agent
-settings_target=/etc/tinc-client/settings.json
-unit_target=/etc/systemd/system/tinc-client-agent.service
+agent_root=/usr/local/lib/tinc-client
+config_root=/etc/tinc-client
+unit_root=/etc/systemd/system
 state_root=/var/lib/tinc-client
+agent_target="$agent_root/vpn-agent"
+settings_target="$config_root/settings.json"
+unit_target="$unit_root/tinc-client-agent.service"
 
 test "$(id -u)" = 0 || { echo 'Run via sudo or pkexec.' >&2; exit 1; }
 test "$#" = 1 || { echo 'Usage: upgrade-agent.sh AGENT_BINARY' >&2; exit 1; }
@@ -17,7 +20,7 @@ test -f "$unit_source" || { echo 'The systemd service unit is missing beside the
 command -v systemctl >/dev/null 2>&1 || { echo 'systemd is required to upgrade the Agent service.' >&2; exit 1; }
 command -v stat >/dev/null 2>&1 || { echo 'stat is required to validate the installed Agent.' >&2; exit 1; }
 
-for directory in /usr/local/lib/tinc-client /etc/tinc-client "$state_root"; do
+for directory in "$agent_root" "$config_root" "$state_root"; do
     test -d "$directory" && test ! -L "$directory" || { echo "Unsafe or missing installation directory: $directory" >&2; exit 1; }
 done
 for installed in "$agent_target" "$settings_target" "$unit_target"; do
