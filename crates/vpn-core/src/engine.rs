@@ -5,6 +5,7 @@ use crate::{
     keys, *,
 };
 use std::{
+    ffi::OsString,
     fs,
     path::Path,
     path::PathBuf,
@@ -90,6 +91,15 @@ where
             append_log(&logs, format!("[Tinc {stream}] {line}")).await;
         }
     }
+}
+
+fn tinc_start_args(config_dir: &Path) -> Vec<OsString> {
+    vec![
+        "-D".into(),
+        "--debug=1".into(),
+        "-c".into(),
+        config_dir.as_os_str().to_owned(),
+    ]
 }
 
 fn background_keepalive_due(
@@ -1020,9 +1030,10 @@ impl Engine {
             .await;
         let mut command = Command::new(&self.settings.tinc_binary);
         command
-            .arg("-D")
-            .arg("-c")
-            .arg(config::generation_path(&self.settings.data_dir, &active))
+            .args(tinc_start_args(&config::generation_path(
+                &self.settings.data_dir,
+                &active,
+            )))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2131,6 +2142,19 @@ mod tinc_log_tests {
         let sanitized = sanitize_tinc_output(&long).unwrap();
         assert_eq!(sanitized.chars().count(), MAX_TINC_LOG_CHARS + 1);
         assert!(sanitized.ends_with('…'));
+    }
+
+    #[test]
+    fn starts_tinc_with_connection_level_diagnostics() {
+        assert_eq!(
+            tinc_start_args(Path::new("C:/protected/generation")),
+            [
+                OsString::from("-D"),
+                OsString::from("--debug=1"),
+                OsString::from("-c"),
+                OsString::from("C:/protected/generation"),
+            ]
+        );
     }
 
     #[tokio::test]
