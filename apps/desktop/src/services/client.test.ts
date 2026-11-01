@@ -44,11 +44,13 @@ describe('server address controls',()=>{
  });
 });
 describe('connection status',()=>{
- it('only reports a verified probe as connected',()=>{
-  expect(connectionView({...status,connection:'connected'}).label).toBe('已验证连通');
-  expect(connectionView({...status,connection:'unreachable'}).label).toBe('暂不可达');
-  expect(connectionView({...status,connection:'unknown'}).label).toBe('尚未验证');
-  expect(connectionView({...status,process_running:true,connection:'unknown'}).label).toBe('正在连接');
+ it('reports only gateway reachability and never implies peer connectivity',()=>{
+  const connected=connectionView({...status,connection:'connected'});
+  expect(connected.label).toBe('网关已连通');
+  expect(connected.detail).toContain('不代表其他节点在线');
+  expect(connectionView({...status,connection:'unreachable'}).label).toBe('网关暂不可达');
+  expect(connectionView({...status,connection:'unknown'}).label).toBe('尚未验证网关');
+  expect(connectionView({...status,process_running:true,connection:'unknown'}).label).toBe('正在连接网关');
  });
 });
 describe('agent version status',()=>{

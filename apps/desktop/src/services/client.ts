@@ -12,10 +12,10 @@ export type AgentSetupMode = 'install'|'upgrade'|null;
 export type Command = 'login'|'configure'|'rotate_key'|'start_vpn'|'stop_vpn'|'get_status'|'get_recent_logs'|'logout'|'get_platform'|'setup_linux_agent';
 export const labels: Record<Phase,string> = { unconfigured:'未配置', configuring:'配置中', waiting_approval:'等待后台确认', stopped:'已停止', starting:'启动中', running:'进程运行中', failed:'操作失败' };
 export function connectionView(status: Status|null): ConnectionView {
-  if (status?.connection === 'connected') return {label:'已验证连通',detail:'服务端 VPN 节点可经专用 TAP 路由到达'};
-  if (status?.connection === 'unreachable') return {label:'暂不可达',detail:'Tinc 仍在运行，Agent 将继续自动探测'};
-  if (status?.process_running) return {label:'正在连接',detail:'Tinc 已运行，正在等待隧道握手与连通性验证'};
-  return {label:'尚未验证',detail:'进程运行不代表 VPN 已连通'};
+  if (status?.connection === 'connected') return {label:'网关已连通',detail:'仅确认服务端 VPN 网关可经专用 TAP 路由到达，不代表其他节点在线'};
+  if (status?.connection === 'unreachable') return {label:'网关暂不可达',detail:'Tinc 仍在运行，Agent 将继续探测服务端 VPN 网关'};
+  if (status?.process_running) return {label:'正在连接网关',detail:'Tinc 已运行，正在等待网关握手与连通性验证'};
+  return {label:'尚未验证网关',detail:'进程运行或网关可达都不能单独证明多节点互联'};
 }
 export function agentVersionView(status: Status|null, appVersion:string, available:boolean):AgentVersionView {
   if (!available) return {label:'未连接',upgradeRequired:false};
