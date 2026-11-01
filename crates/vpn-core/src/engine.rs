@@ -13,6 +13,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
     process::{Child, Command},
     sync::{Mutex, RwLock},
 };
@@ -37,6 +38,59 @@ const CONNECTIVITY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MANAGED_ROUTES: usize = 1025;
+const MAX_LOG_ENTRIES: usize = 200;
+const MAX_TINC_LOG_CHARS: usize = 512;
+const MAX_TINC_OUTPUT_BYTES: u64 = 256 * 1024;
+
+async fn append_log(logs: &Arc<Mutex<Vec<LogEntry>>>, message: String) {
+    let mut logs = logs.lock().await;
+    if logs.len() >= MAX_LOG_ENTRIES {
+        logs.remove(0);
+    }
+    logs.push(LogEntry {
+        time: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        message,
+    });
+}
+
+fn sanitize_tinc_output(line: &str) -> Option<String> {
+    let cleaned: String = line
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    let lowercase = cleaned.to_ascii_lowercase();
+    if ["private key", "password", "token", "authorization"]
+        .iter()
+        .any(|marker| lowercase.contains(marker))
+    {
+        return Some("已省略可能包含敏感字段的 Tinc 输出".into());
+    }
+    let mut characters = cleaned.chars();
+    let mut visible: String = characters.by_ref().take(MAX_TINC_LOG_CHARS).collect();
+    if characters.next().is_some() {
+        visible.push('…');
+    }
+    Some(visible)
+}
+
+async fn capture_tinc_output<R>(reader: R, stream: &'static str, logs: Arc<Mutex<Vec<LogEntry>>>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    let mut lines = BufReader::new(reader.take(MAX_TINC_OUTPUT_BYTES)).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(line) = sanitize_tinc_output(&line) {
+            append_log(&logs, format!("[Tinc {stream}] {line}")).await;
+        }
+    }
+}
 
 fn background_keepalive_due(
     child_running: bool,
@@ -402,17 +456,7 @@ impl Engine {
         self.log(message).await;
     }
     async fn log(&self, message: &str) {
-        let mut logs = self.logs.lock().await;
-        if logs.len() >= 200 {
-            logs.remove(0);
-        }
-        logs.push(LogEntry {
-            time: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            message: message.into(),
-        });
+        append_log(&self.logs, message.into()).await;
     }
     pub async fn fail(&mut self, error: Error) -> Reply {
         if session_authorization_lost(&error.code) {
@@ -980,17 +1024,26 @@ impl Engine {
             .arg("-c")
             .arg(config::generation_path(&self.settings.data_dir, &active))
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         hide(&mut command);
-        self.child = Some(command.spawn().map_err(|_| {
+        let mut child = command.spawn().map_err(|_| {
             Error::new(
                 "start_failed",
                 "Tinc 进程无法启动，请检查安装、权限和驱动",
                 true,
             )
-        })?);
+        })?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        self.child = Some(child);
+        if let Some(stdout) = stdout {
+            tokio::spawn(capture_tinc_output(stdout, "stdout", self.logs.clone()));
+        }
+        if let Some(stderr) = stderr {
+            tokio::spawn(capture_tinc_output(stderr, "stderr", self.logs.clone()));
+        }
         #[cfg(windows)]
         if let Some(handle) = self.child.as_ref().and_then(Child::raw_handle) {
             if unsafe { self.job.assign(handle) }.is_err() {
@@ -2055,6 +2108,63 @@ mod linux_tests {
             linux_delete_route_args("tinc0", "10.42.0.1", 32),
             ["route", "delete", "10.42.0.1/32", "dev", "tinc0"]
         );
+    }
+}
+
+#[cfg(test)]
+mod tinc_log_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn sanitizes_tinc_output_before_it_reaches_the_activity_log() {
+        assert_eq!(sanitize_tinc_output("\r\n\t"), None);
+        assert_eq!(
+            sanitize_tinc_output("connected\u{1b}[31m peer"),
+            Some("connected[31m peer".into())
+        );
+        assert_eq!(
+            sanitize_tinc_output("token=must-not-appear"),
+            Some("已省略可能包含敏感字段的 Tinc 输出".into())
+        );
+        let long = "x".repeat(MAX_TINC_LOG_CHARS + 1);
+        let sanitized = sanitize_tinc_output(&long).unwrap();
+        assert_eq!(sanitized.chars().count(), MAX_TINC_LOG_CHARS + 1);
+        assert!(sanitized.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn captures_bounded_prefixed_lines_without_exposing_sensitive_values() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let task = tokio::spawn(capture_tinc_output(reader, "stderr", logs.clone()));
+        writer
+            .write_all(b"peer connected\npassword=secret\n")
+            .await
+            .unwrap();
+        drop(writer);
+        task.await.unwrap();
+
+        let logs = logs.lock().await;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].message, "[Tinc stderr] peer connected");
+        assert_eq!(
+            logs[1].message,
+            "[Tinc stderr] 已省略可能包含敏感字段的 Tinc 输出"
+        );
+        assert!(!logs.iter().any(|entry| entry.message.contains("secret")));
+    }
+
+    #[tokio::test]
+    async fn activity_log_keeps_only_the_latest_bounded_entries() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        for index in 0..MAX_LOG_ENTRIES + 5 {
+            append_log(&logs, format!("entry-{index}")).await;
+        }
+        let logs = logs.lock().await;
+        assert_eq!(logs.len(), MAX_LOG_ENTRIES);
+        assert_eq!(logs.first().unwrap().message, "entry-5");
+        assert_eq!(logs.last().unwrap().message, "entry-204");
     }
 }
 
