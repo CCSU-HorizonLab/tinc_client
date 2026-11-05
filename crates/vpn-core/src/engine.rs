@@ -328,6 +328,7 @@ fn route_lease_is_valid(deadline: Option<std::time::Instant>, now: std::time::In
 fn route_snapshot_needs_reconcile(
     current_revision: Option<&str>,
     current_routes: &[RouteState],
+    has_pending_operations: bool,
     next_revision: &str,
     next_routes: &[RouteState],
 ) -> Result<bool> {
@@ -336,7 +337,9 @@ fn route_snapshot_needs_reconcile(
             "服务端在相同 route_revision 下返回了不同路由内容，已拒绝更新",
         ));
     }
-    Ok(current_revision != Some(next_revision) || current_routes != next_routes)
+    Ok(has_pending_operations
+        || current_revision != Some(next_revision)
+        || current_routes != next_routes)
 }
 
 fn keepalive_ticket_is_current(
@@ -925,13 +928,14 @@ impl Engine {
         let needs_reconcile = route_snapshot_needs_reconcile(
             self.route_revision.as_deref(),
             self.route_manager.desired(),
+            !self.route_manager.pending().is_empty(),
             revision,
             &desired,
         )?;
         self.route_lease_deadline = Some(deadline);
         if needs_reconcile {
-            self.route_revision = Some(revision.to_owned());
             self.reconcile_routes(&desired).await?;
+            self.route_revision = Some(revision.to_owned());
             let ip = self
                 .active
                 .as_ref()
@@ -2235,6 +2239,7 @@ mod route_lifecycle_tests {
         assert!(!route_snapshot_needs_reconcile(
             Some("routes-fixture"),
             &current,
+            false,
             "routes-fixture",
             &current,
         )
@@ -2242,7 +2247,21 @@ mod route_lifecycle_tests {
         assert!(route_snapshot_needs_reconcile(
             Some("routes-fixture"),
             &current,
+            false,
             "routes-next",
+            &current,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn pending_operations_force_reconciliation_of_an_unchanged_snapshot() {
+        let current = vec![route(1), route(212)];
+        assert!(route_snapshot_needs_reconcile(
+            Some("routes-fixture"),
+            &current,
+            true,
+            "routes-fixture",
             &current,
         )
         .unwrap());
@@ -2254,6 +2273,7 @@ mod route_lifecycle_tests {
         let error = route_snapshot_needs_reconcile(
             Some("routes-fixture"),
             &current,
+            false,
             "routes-fixture",
             &[route(1), route(211)],
         )
