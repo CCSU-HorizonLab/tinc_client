@@ -122,6 +122,32 @@ fn keepalive_error_requires_immediate_failure(code: &str) -> bool {
     session_authorization_lost(code) || code == "node_revoked"
 }
 
+fn keepalive_failure_label(code: &str) -> &'static str {
+    match code {
+        "network_timeout" => "网络请求超时",
+        "network" => "网络连接失败",
+        "session_unavailable" => "会话服务暂不可用",
+        "keepalive_failed" => "心跳服务暂不可用",
+        "route_snapshot_unavailable" => "授权路由快照暂不可用",
+        "gateway_unavailable" => "网关服务暂不可用",
+        "http" | "server_error" => "服务端暂时异常",
+        "protocol" => "续期响应契约无效",
+        _ => "未知临时错误",
+    }
+}
+
+fn route_lease_remaining_seconds(
+    deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> u64 {
+    let remaining = deadline
+        .map(|deadline| deadline.saturating_duration_since(now))
+        .unwrap_or_default();
+    remaining
+        .as_secs()
+        .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeepaliveTicket {
     session_epoch: u64,
@@ -385,6 +411,7 @@ pub struct Engine {
     last_probe: Option<tokio::time::Instant>,
     probe_started_at: Option<tokio::time::Instant>,
     last_keepalive: Option<tokio::time::Instant>,
+    keepalive_failure_streak: u32,
     route_revision: Option<String>,
     route_lease_deadline: Option<std::time::Instant>,
     #[cfg(unix)]
@@ -447,6 +474,7 @@ impl Engine {
             last_probe: None,
             probe_started_at: None,
             last_keepalive: None,
+            keepalive_failure_streak: 0,
             route_revision: adapter_state
                 .as_ref()
                 .and_then(|state| state.route_revision.clone()),
@@ -575,6 +603,7 @@ impl Engine {
                 self.session = Some(session);
                 self.session_epoch = self.session_epoch.wrapping_add(1);
                 self.active_keepalive_request = None;
+                self.keepalive_failure_streak = 0;
                 self.log("登录成功，已取得后台分配的网络与节点地址").await;
             }
             Request::Configure => self.configure().await?,
@@ -880,6 +909,16 @@ impl Engine {
             if keepalive_error_requires_immediate_failure(&error.code) {
                 return Err(error.clone());
             }
+            self.keepalive_failure_streak = self.keepalive_failure_streak.saturating_add(1);
+            let remaining =
+                route_lease_remaining_seconds(self.route_lease_deadline, std::time::Instant::now());
+            self.log(&format!(
+                "路由授权续期暂时失败（{}，连续 {} 次）；将继续重试，当前租约剩余约 {} 秒",
+                keepalive_failure_label(&error.code),
+                self.keepalive_failure_streak,
+                remaining
+            ))
+            .await;
             // A transient or malformed response does not revoke an otherwise
             // valid lease. It becomes fail-closed only at the saved deadline.
             return self.ensure_route_lease_valid();
@@ -888,6 +927,14 @@ impl Engine {
             return Ok(());
         }
         let Some(snapshot) = keepalive.ok().flatten() else {
+            self.keepalive_failure_streak = self.keepalive_failure_streak.saturating_add(1);
+            let remaining =
+                route_lease_remaining_seconds(self.route_lease_deadline, std::time::Instant::now());
+            self.log(&format!(
+                "路由授权续期响应缺少有效快照（连续 {} 次）；将继续重试，当前租约剩余约 {} 秒",
+                self.keepalive_failure_streak, remaining
+            ))
+            .await;
             // A successful but legacy/malformed heartbeat must not erase an
             // existing authorization lease. Keep using the last snapshot only
             // until its original deadline, then fail closed in poll().
@@ -896,7 +943,9 @@ impl Engine {
         // Once the previous local lease has expired, even a late successful
         // response from a request started earlier cannot resurrect that VPN.
         self.ensure_route_lease_valid()?;
-        self.apply_route_snapshot(&snapshot).await
+        self.apply_route_snapshot(&snapshot).await?;
+        self.keepalive_failure_streak = 0;
+        Ok(())
     }
 
     fn ensure_route_lease_valid(&self) -> Result<()> {
@@ -1081,6 +1130,7 @@ impl Engine {
         }
         self.route_revision = Some(route_revision);
         self.route_lease_deadline = Some(route_lease_deadline);
+        self.keepalive_failure_streak = 0;
         if let Err(error) = self.set_adapter(&active.identity.node_ip, &routes).await {
             self.stop().await?;
             return Err(error);
@@ -1639,6 +1689,7 @@ impl Engine {
         self.probe_started_at = None;
         self.route_revision = None;
         self.route_lease_deadline = None;
+        self.keepalive_failure_streak = 0;
         self.stage(
             if self.active.is_some() {
                 Phase::Stopped
@@ -2231,6 +2282,22 @@ mod route_lifecycle_tests {
             Some(now + Duration::from_nanos(1)),
             now
         ));
+    }
+
+    #[test]
+    fn keepalive_diagnostics_are_bounded_to_safe_categories_and_monotonic_time() {
+        let now = std::time::Instant::now();
+        assert_eq!(keepalive_failure_label("network_timeout"), "网络请求超时");
+        assert_eq!(
+            keepalive_failure_label("server-secret-detail"),
+            "未知临时错误"
+        );
+        assert_eq!(
+            route_lease_remaining_seconds(Some(now + Duration::from_millis(1)), now),
+            1
+        );
+        assert_eq!(route_lease_remaining_seconds(Some(now), now), 0);
+        assert_eq!(route_lease_remaining_seconds(None, now), 0);
     }
 
     #[test]
