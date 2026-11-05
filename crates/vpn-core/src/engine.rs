@@ -149,6 +149,19 @@ fn route_lease_remaining_seconds(
         .saturating_add(u64::from(remaining.subsec_nanos() > 0))
 }
 
+fn keepalive_recovery_message(
+    failure_streak: u32,
+    deadline: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<String> {
+    (failure_streak > 0).then(|| {
+        format!(
+            "路由授权续期已恢复（此前连续失败 {failure_streak} 次）；新租约剩余约 {} 秒",
+            route_lease_remaining_seconds(deadline, now)
+        )
+    })
+}
+
 fn next_probe_connection(
     result: Option<bool>,
     within_grace: bool,
@@ -976,7 +989,15 @@ impl Engine {
         // Once the previous local lease has expired, even a late successful
         // response from a request started earlier cannot resurrect that VPN.
         self.ensure_route_lease_valid()?;
+        let previous_failures = self.keepalive_failure_streak;
         self.apply_route_snapshot(&snapshot).await?;
+        if let Some(message) = keepalive_recovery_message(
+            previous_failures,
+            self.route_lease_deadline,
+            std::time::Instant::now(),
+        ) {
+            self.log(&message).await;
+        }
         self.keepalive_failure_streak = 0;
         Ok(())
     }
@@ -2374,6 +2395,11 @@ mod route_lifecycle_tests {
         );
         assert_eq!(route_lease_remaining_seconds(Some(now), now), 0);
         assert_eq!(route_lease_remaining_seconds(None, now), 0);
+        assert_eq!(keepalive_recovery_message(0, Some(now), now), None);
+        assert_eq!(
+            keepalive_recovery_message(2, Some(now + Duration::from_secs(120)), now),
+            Some("路由授权续期已恢复（此前连续失败 2 次）；新租约剩余约 120 秒".into())
+        );
     }
 
     #[test]
