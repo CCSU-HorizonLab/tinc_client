@@ -37,6 +37,7 @@ const ADAPTER_STATE_VERSION: u8 = 2;
 const ADAPTER_STATE_FILE: &str = "adapter-state.json";
 const CONNECTIVITY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 const CONNECTIVITY_GRACE_PERIOD: Duration = Duration::from_secs(15);
+const CONNECTIVITY_FAILURE_THRESHOLD: u8 = 3;
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_MANAGED_ROUTES: usize = 1025;
 const MAX_LOG_ENTRIES: usize = 200;
@@ -146,6 +147,35 @@ fn route_lease_remaining_seconds(
     remaining
         .as_secs()
         .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+}
+
+fn next_probe_connection(
+    result: Option<bool>,
+    within_grace: bool,
+    current: &str,
+    consecutive_failures: u8,
+) -> (u8, &'static str) {
+    match result {
+        Some(true) => (0, "connected"),
+        Some(false) => {
+            let failures = consecutive_failures.saturating_add(1);
+            if within_grace && current != "connected" {
+                (failures, "unknown")
+            } else if failures < CONNECTIVITY_FAILURE_THRESHOLD {
+                (
+                    failures,
+                    if current == "connected" {
+                        "connected"
+                    } else {
+                        "unknown"
+                    },
+                )
+            } else {
+                (failures, "unreachable")
+            }
+        }
+        None => (0, "unknown"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,6 +440,7 @@ pub struct Engine {
     probe_target: Option<std::net::Ipv4Addr>,
     last_probe: Option<tokio::time::Instant>,
     probe_started_at: Option<tokio::time::Instant>,
+    consecutive_probe_failures: u8,
     last_keepalive: Option<tokio::time::Instant>,
     keepalive_failure_streak: u32,
     route_revision: Option<String>,
@@ -473,6 +504,7 @@ impl Engine {
             probe_target: None,
             last_probe: None,
             probe_started_at: None,
+            consecutive_probe_failures: 0,
             last_keepalive: None,
             keepalive_failure_streak: 0,
             route_revision: adapter_state
@@ -848,6 +880,7 @@ impl Engine {
                 self.probe_target = None;
                 self.last_probe = None;
                 self.probe_started_at = None;
+                self.consecutive_probe_failures = 0;
                 self.route_revision = None;
                 self.route_lease_deadline = None;
             }
@@ -1148,6 +1181,7 @@ impl Engine {
         self.probe_target = Some(probe_target);
         self.last_probe = None;
         self.probe_started_at = Some(tokio::time::Instant::now());
+        self.consecutive_probe_failures = 0;
         self.stage(Phase::Running, "Tinc 进程运行中；正在建立安全隧道")
             .await;
         self.probe_connection().await;
@@ -1687,6 +1721,7 @@ impl Engine {
         self.probe_target = None;
         self.last_probe = None;
         self.probe_started_at = None;
+        self.consecutive_probe_failures = 0;
         self.route_revision = None;
         self.route_lease_deadline = None;
         self.keepalive_failure_streak = 0;
@@ -1711,23 +1746,27 @@ impl Engine {
         let within_grace = self
             .probe_started_at
             .is_some_and(|started| started.elapsed() < CONNECTIVITY_GRACE_PERIOD);
-        let (connection, message) = match result {
-            Some(true) => (
-                "connected",
-                format!("VPN 隧道已验证：服务端节点 {target} 可达"),
+        let current = self.status.read().await.connection.clone();
+        let (failures, connection) = next_probe_connection(
+            result,
+            within_grace,
+            &current,
+            self.consecutive_probe_failures,
+        );
+        self.consecutive_probe_failures = failures;
+        let message = match result {
+            Some(true) => format!("VPN 隧道已验证：服务端节点 {target} 可达"),
+            Some(false) if within_grace && current != "connected" => {
+                format!("正在建立安全隧道；服务端节点 {target} 尚未响应")
+            }
+            Some(false) if connection == "connected" => format!(
+                "服务端节点 {target} 单次探测未响应（连续 {failures}/{CONNECTIVITY_FAILURE_THRESHOLD}），正在复核；Tinc 进程仍在运行"
             ),
-            Some(false) if within_grace => (
-                "unknown",
-                format!("正在建立安全隧道；服务端节点 {target} 尚未响应"),
+            Some(false) if connection == "unknown" => format!(
+                "正在复核服务端节点 {target} 连通性（连续 {failures}/{CONNECTIVITY_FAILURE_THRESHOLD}）"
             ),
-            Some(false) => (
-                "unreachable",
-                format!("Tinc 进程运行中；服务端节点 {target} 暂不可达"),
-            ),
-            None => (
-                "unknown",
-                "Tinc 进程运行中；系统连通性探测工具不可用".into(),
-            ),
+            Some(false) => format!("Tinc 进程运行中；服务端节点 {target} 暂不可达"),
+            None => "Tinc 进程运行中；系统连通性探测工具不可用".into(),
         };
         let changed = {
             let mut status = self.status.write().await;
@@ -2244,6 +2283,43 @@ mod tinc_log_tests {
         assert_eq!(logs.len(), MAX_LOG_ENTRIES);
         assert_eq!(logs.first().unwrap().message, "entry-5");
         assert_eq!(logs.last().unwrap().message, "entry-204");
+    }
+}
+
+#[cfg(test)]
+mod connectivity_probe_tests {
+    use super::*;
+
+    #[test]
+    fn transient_ping_loss_requires_three_consecutive_failures() {
+        let (failures, connection) = next_probe_connection(Some(false), false, "connected", 0);
+        assert_eq!((failures, connection), (1, "connected"));
+        let (failures, connection) =
+            next_probe_connection(Some(false), false, connection, failures);
+        assert_eq!((failures, connection), (2, "connected"));
+        let (failures, connection) =
+            next_probe_connection(Some(false), false, connection, failures);
+        assert_eq!((failures, connection), (3, "unreachable"));
+        assert_eq!(
+            next_probe_connection(Some(true), false, connection, failures),
+            (0, "connected")
+        );
+    }
+
+    #[test]
+    fn startup_grace_does_not_downgrade_an_already_verified_gateway() {
+        assert_eq!(
+            next_probe_connection(Some(false), true, "unknown", 0),
+            (1, "unknown")
+        );
+        assert_eq!(
+            next_probe_connection(Some(false), true, "connected", 0),
+            (1, "connected")
+        );
+        assert_eq!(
+            next_probe_connection(None, false, "connected", 2),
+            (0, "unknown")
+        );
     }
 }
 
