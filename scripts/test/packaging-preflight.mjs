@@ -59,6 +59,11 @@ assert.match(linuxInstallRollback,/Install rollback left a managed file/,'Linux 
 assert.match(linuxUpgradeRollback,/Rollback did not restore the old Agent/,'Linux upgrade rollback must remain covered in CI');
 assert.match(linuxUninstallOwnership,/Untrusted Agent service reached systemctl/,'Linux uninstall ownership checks must remain covered in CI');
 const debFiles=linuxBundle.bundle?.linux?.deb?.files??{};
+assert.deepEqual(
+  linuxBundle.bundle?.linux?.deb?.depends,
+  ['tinc','iproute2','iputils-ping','pkexec'],
+  'Linux DEB must declare every runtime dependency required by Agent setup',
+);
 for(const expected of [
   '/usr/share/tinc-connect/payload/vpn-agent',
   '/usr/share/tinc-connect/payload/setup-agent.sh',
@@ -74,7 +79,7 @@ for(const expected of ['restore_previous','upgrade_started=1','upgrade_succeeded
 assert(linuxUpgrade.indexOf('install -m 755 "$agent_target" "$backup_dir/vpn-agent"')<linuxUpgrade.indexOf('systemctl stop tinc-client-agent.service'),'Linux upgrade must back up the Agent before stopping or replacing it');
 for(const expected of ['stat -c %u','-perm /022','grep -Fxc "ExecStart=$agent_target"','systemctl disable --now tinc-client-agent.service'])
   assert.match(linuxUninstall,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
-for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", 'Debian package is missing required payload'])
+for(const expected of ["'--release'", "'-p', 'vpn-agent'", "'--bundles', 'deb'", "chmodSync(stagedAgent, 0o755)", "spawnSync('dpkg-deb'", "'--field'", 'Debian package is missing required payload', 'Debian package is missing required dependency'])
   assert.match(linuxBuild,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ['/usr/bin/pkexec','/usr/share/tinc-connect/payload/setup-agent.sh','metadata.uid() == 0','mode() & 0o022 == 0','unsupported_platform_action'])
   assert.match(desktopRust,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));

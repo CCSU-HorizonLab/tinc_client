@@ -84,4 +84,24 @@ for (const expected of [
     process.exit(1);
   }
 }
+const dependencies = spawnSync('dpkg-deb', ['--field', packages[0], 'Depends'], { encoding: 'utf8' });
+if (dependencies.error || dependencies.status !== 0) {
+  if (dependencies.stderr) process.stderr.write(dependencies.stderr);
+  console.error(
+    dependencies.error
+      ? `Unable to inspect Debian package dependencies: ${dependencies.error.message}`
+      : 'Unable to inspect Debian package dependencies.',
+  );
+  process.exit(dependencies.status ?? 1);
+}
+for (const expected of ['tinc', 'iproute2', 'iputils-ping', 'pkexec']) {
+  const declared = dependencies.stdout
+    .split(',')
+    .map((entry) => entry.trim().split(/[ (]/, 1)[0])
+    .includes(expected);
+  if (!declared) {
+    console.error(`Debian package is missing required dependency: ${expected}`);
+    process.exit(1);
+  }
+}
 console.log(`Verified Linux desktop and Agent payload: ${packages[0]}`);

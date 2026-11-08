@@ -4,6 +4,12 @@
     "targets": ["deb"],
     "linux": {
       "deb": {
+        "depends": [
+          "tinc",
+          "iproute2",
+          "iputils-ping",
+          "pkexec"
+        ],
         "files": {
           "/usr/share/tinc-connect/payload/vpn-agent": "../../../.runtime/build/linux-payload/vpn-agent",
           "/usr/share/tinc-connect/payload/setup-agent.sh": "../../../packaging/linux/setup-agent.sh",
