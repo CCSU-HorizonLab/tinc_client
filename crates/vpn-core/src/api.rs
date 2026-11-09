@@ -440,7 +440,7 @@ impl Session {
                 false,
             ));
         }
-        if !v["status"].as_i64().is_some_and(|s| s > 0) {
+        if v["status"].as_i64().is_none_or(|s| s <= 0) {
             return Err(Error::protocol("登录响应缺少有效 status，不能确认登录成功"));
         }
         let field = |key: &str| {
