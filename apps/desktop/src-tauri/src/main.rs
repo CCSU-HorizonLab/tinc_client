@@ -118,7 +118,7 @@ async fn setup_linux_agent() -> Result<()> {
                     "Linux Agent 安装任务异常结束，请重试",
                     true,
                 )
-            })?;
+            })?
     }
     #[cfg(windows)]
     Err(Error::new(
