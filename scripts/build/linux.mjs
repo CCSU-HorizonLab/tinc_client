@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  missingDebArchivePaths,
+  REQUIRED_LINUX_PAYLOAD_PATHS,
+} from './deb-contents.mjs';
 
 const root = resolve(import.meta.dirname, '..', '..');
 if (process.platform !== 'linux') {
@@ -71,18 +75,10 @@ if (contents.error || contents.status !== 0) {
   console.error(contents.error ? `Unable to inspect Debian package: ${contents.error.message}` : 'Unable to inspect Debian package contents.');
   process.exit(contents.status ?? 1);
 }
-for (const expected of [
-  './usr/share/tinc-connect/payload/vpn-agent',
-  './usr/share/tinc-connect/payload/setup-agent.sh',
-  './usr/share/tinc-connect/payload/install-agent.sh',
-  './usr/share/tinc-connect/payload/upgrade-agent.sh',
-  './usr/share/tinc-connect/payload/uninstall-agent.sh',
-  './usr/share/tinc-connect/payload/tinc-client-agent.service',
-]) {
-  if (!contents.stdout.includes(expected)) {
-    console.error(`Debian package is missing required payload: ${expected}`);
-    process.exit(1);
-  }
+const missingPayloads = missingDebArchivePaths(contents.stdout, REQUIRED_LINUX_PAYLOAD_PATHS);
+if (missingPayloads.length) {
+  console.error(`Debian package is missing required payload: ${missingPayloads[0]}`);
+  process.exit(1);
 }
 const dependencies = spawnSync('dpkg-deb', ['--field', packages[0], 'Depends'], { encoding: 'utf8' });
 if (dependencies.error || dependencies.status !== 0) {

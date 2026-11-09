@@ -5,6 +5,10 @@ import {existsSync} from 'node:fs';
 import {readFile} from 'node:fs/promises';
 import {spawnSync} from 'node:child_process';
 import {resolve} from 'node:path';
+import {
+  missingDebArchivePaths,
+  REQUIRED_LINUX_PAYLOAD_PATHS,
+} from '../build/deb-contents.mjs';
 
 const root=resolve(import.meta.dirname,'..','..');
 const windows=await readFile(resolve(root,'packaging/windows/install-agent.ps1'),'utf8');
@@ -72,6 +76,25 @@ for(const expected of [
   '/usr/share/tinc-connect/payload/uninstall-agent.sh',
   '/usr/share/tinc-connect/payload/tinc-client-agent.service'
 ]) assert.equal(typeof debFiles[expected],'string',`Linux DEB must include ${expected}`);
+const debContents=(paths,prefix='')=>paths
+  .map(path=>`-rwxr-xr-x root/root 1 2026-11-10 00:00 ${prefix}${path}`)
+  .join('\n');
+assert.deepEqual(
+  missingDebArchivePaths(debContents(REQUIRED_LINUX_PAYLOAD_PATHS,'./'),REQUIRED_LINUX_PAYLOAD_PATHS),
+  [],
+  'Linux DEB payload verification must accept ./-prefixed archive paths',
+);
+assert.deepEqual(
+  missingDebArchivePaths(debContents(REQUIRED_LINUX_PAYLOAD_PATHS),REQUIRED_LINUX_PAYLOAD_PATHS),
+  [],
+  'Linux DEB payload verification must accept archive paths without ./',
+);
+const deceptivePayload=[...REQUIRED_LINUX_PAYLOAD_PATHS.slice(1),`${REQUIRED_LINUX_PAYLOAD_PATHS[0]}.backup`];
+assert.deepEqual(
+  missingDebArchivePaths(debContents(deceptivePayload),REQUIRED_LINUX_PAYLOAD_PATHS),
+  [REQUIRED_LINUX_PAYLOAD_PATHS[0]],
+  'Linux DEB payload verification must reject substring matches for a missing exact path',
+);
 for(const expected of ['PKEXEC_UID','SUDO_UID','Unable to identify the non-root desktop user',`exec /bin/sh "$installer" "$agent" "$owner_uid" tinc`])
   assert.match(linuxSetup,new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 for(const expected of ['restore_previous','upgrade_started=1','upgrade_succeeded=1','systemctl stop tinc-client-agent.service','systemctl is-active --quiet tinc-client-agent.service','Existing settings, profiles and keys were retained'])
