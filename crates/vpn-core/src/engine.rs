@@ -220,7 +220,8 @@ struct AdapterState {
     #[serde(default)]
     pending_operations: Vec<RouteOperation>,
     #[cfg(unix)]
-    link_touched: bool,
+    #[serde(default)]
+    link_touched: Option<bool>,
 }
 
 impl AdapterState {
@@ -245,7 +246,7 @@ impl AdapterState {
             owned_routes: route_manager.owned().to_vec(),
             pending_operations: route_manager.pending().to_vec(),
             #[cfg(unix)]
-            link_touched: _link_touched,
+            link_touched: Some(_link_touched),
         }
     }
 
@@ -255,13 +256,18 @@ impl AdapterState {
         let stable_identity_matches = self.version == 1
             || (self.node_id == active.identity.node_id
                 && self.network_id == active.identity.network_id);
+        #[cfg(unix)]
+        let link_ownership_valid = self.version == 1 || self.link_touched.is_some();
+        #[cfg(not(unix))]
+        let link_ownership_valid = true;
         let matches = supported_version
             && self.interface == settings.interface
             && self.address == active.identity.node_ip
             && self.prefix == settings.interface_prefix
             && self.generation == active.generation
             && self.profile == active.profile
-            && stable_identity_matches;
+            && stable_identity_matches
+            && link_ownership_valid;
         let revision_valid = self.route_revision.as_ref().is_none_or(|revision| {
             !revision.is_empty()
                 && revision.len() <= 256
@@ -319,6 +325,11 @@ impl AdapterState {
             self.owned_routes.clone(),
             self.pending_operations.clone(),
         )
+    }
+
+    #[cfg(unix)]
+    fn owns_link_state(&self) -> bool {
+        self.link_touched.unwrap_or(false)
     }
 }
 
@@ -527,7 +538,7 @@ impl Engine {
             #[cfg(unix)]
             adapter_link_touched: adapter_state
                 .as_ref()
-                .is_some_and(|state| state.link_touched),
+                .is_some_and(AdapterState::owns_link_state),
             #[cfg(windows)]
             job: platform_windows::ProcessJob::new().map_err(Error::io)?,
         })
@@ -2577,6 +2588,47 @@ mod adapter_state_tests {
         assert!(value.get("pending_operations").is_some());
         assert_eq!(value["route_revision"], "network-11-fixture");
         assert!(value.get("routes").is_none());
+        #[cfg(unix)]
+        assert_eq!(value["link_touched"], true);
+    }
+
+    #[test]
+    fn version_two_current_state_round_trips() {
+        let settings = settings();
+        let active = active();
+        let manager = RouteManager::default();
+        let value = serde_json::to_value(AdapterState::current(
+            &settings, &active, &manager, None, false,
+        ))
+        .unwrap();
+
+        let state: AdapterState = serde_json::from_value(value).unwrap();
+        state.validate(&settings, Some(&active)).unwrap();
+        let restored = state.route_manager();
+        assert!(restored.desired().is_empty());
+        assert!(restored.owned().is_empty());
+        assert!(restored.pending().is_empty());
+        #[cfg(unix)]
+        assert!(!state.owns_link_state());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_two_state_requires_explicit_link_ownership() {
+        let settings = settings();
+        let active = active();
+        let manager = RouteManager::default();
+        let mut value = serde_json::to_value(AdapterState::current(
+            &settings, &active, &manager, None, false,
+        ))
+        .unwrap();
+        value.as_object_mut().unwrap().remove("link_touched");
+
+        let state: AdapterState = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            state.validate(&settings, Some(&active)).unwrap_err().code,
+            "adapter_state_invalid"
+        );
     }
 
     #[test]
@@ -2677,6 +2729,8 @@ mod adapter_state_tests {
         let state: AdapterState = serde_json::from_value(legacy).unwrap();
 
         state.validate(&settings, Some(&active)).unwrap();
+        #[cfg(unix)]
+        assert!(!state.owns_link_state());
         let restored = state.route_manager();
         assert_eq!(restored.desired(), restored.owned());
         assert!(restored.pending().is_empty());
