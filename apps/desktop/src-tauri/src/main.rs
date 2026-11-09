@@ -110,7 +110,7 @@ fn get_platform() -> &'static str {
 async fn setup_linux_agent() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        return tauri::async_runtime::spawn_blocking(linux_setup::install)
+        tauri::async_runtime::spawn_blocking(linux_setup::install)
             .await
             .map_err(|_| {
                 Error::new(
