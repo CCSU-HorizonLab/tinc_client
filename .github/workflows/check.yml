@@ -34,13 +34,16 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo build --locked -p vpn-agent -p tinc-desktop
       - run: cargo build --locked -p vpn-agent --example process_fixture
-      - if: runner.os == 'Linux'
-        run: cargo build --locked -p platform-linux --example secure_socket_systemd_fixture
-      - if: runner.os == 'Linux'
-        run: sudo sh scripts/test/linux-secure-socket-systemd.sh
       - run: npm run test:e2e
       - if: runner.os == 'Windows'
         name: Build Windows release binaries
         run: cargo build --locked --release -p vpn-agent -p tinc-desktop
       - if: runner.os == 'Linux'
         run: npm run desktop:build:linux
+  linux-secure-socket:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked -p platform-linux --example secure_socket_systemd_fixture
+      - run: sudo sh scripts/test/linux-secure-socket-systemd.sh
