@@ -34,6 +34,10 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo build --locked -p vpn-agent -p tinc-desktop
       - run: cargo build --locked -p vpn-agent --example process_fixture
+      - if: runner.os == 'Linux'
+        run: cargo build --locked -p platform-linux --example secure_socket_systemd_fixture
+      - if: runner.os == 'Linux'
+        run: sudo sh scripts/test/linux-secure-socket-systemd.sh
       - run: npm run test:e2e
       - if: runner.os == 'Windows'
         name: Build Windows release binaries

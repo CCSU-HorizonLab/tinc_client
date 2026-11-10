@@ -30,6 +30,7 @@ const linuxInstallRollback=await readFile(resolve(root,'scripts/test/linux-insta
 const linuxUpgradeRollback=await readFile(resolve(root,'scripts/test/linux-upgrade-rollback.sh'),'utf8');
 const linuxUninstall=await readFile(resolve(root,'packaging/linux/uninstall-agent.sh'),'utf8');
 const linuxUninstallOwnership=await readFile(resolve(root,'scripts/test/linux-uninstall-ownership.sh'),'utf8');
+const linuxSecureSocketSystemd=await readFile(resolve(root,'scripts/test/linux-secure-socket-systemd.sh'),'utf8');
 const desktopCargo=await readFile(resolve(root,'apps/desktop/src-tauri/Cargo.toml'),'utf8');
 const linuxBundle=JSON.parse(await readFile(resolve(root,'apps/desktop/src-tauri/tauri.linux.conf.json'),'utf8'));
 const linuxBuild=await readFile(resolve(root,'scripts/build/linux.mjs'),'utf8');
@@ -62,6 +63,9 @@ assert.match(linuxInstallerInputs,/Expected installer rejection/,'Linux installe
 assert.match(linuxInstallRollback,/Install rollback left a managed file/,'Linux partial-install rollback must remain covered in CI');
 assert.match(linuxUpgradeRollback,/Rollback did not restore the old Agent/,'Linux upgrade rollback must remain covered in CI');
 assert.match(linuxUninstallOwnership,/Untrusted Agent service reached systemctl/,'Linux uninstall ownership checks must remain covered in CI');
+assert.match(linuxSecureSocketSystemd,/LEGACY_CHMOD_ERRNO=1/,'Linux socket regression must capture the legacy EPERM errno');
+assert.match(linuxSecureSocketSystemd,/SECURE_SOCKET_OK uid=\$owner_uid mode=600/,'Linux socket regression must verify final ownership and mode');
+assert.match(linuxSecureSocketSystemd,/CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_CHOWN CAP_DAC_OVERRIDE/,'Linux socket regression must use the production capability boundary without CAP_FOWNER');
 const debFiles=linuxBundle.bundle?.linux?.deb?.files??{};
 assert.deepEqual(
   linuxBundle.bundle?.linux?.deb?.depends,
@@ -114,6 +118,7 @@ assert.match(ciWorkflow,/runner\.os == 'Linux'[\s\S]*npm run desktop:build:linux
 assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-install-rollback\.sh/,'Linux CI must execute the isolated Agent install rollback test');
 assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-upgrade-rollback\.sh/,'Linux CI must execute the isolated Agent rollback test');
 assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-uninstall-ownership\.sh/,'Linux CI must execute the isolated Agent uninstall ownership test');
+assert.match(ciWorkflow,/sudo sh scripts\/test\/linux-secure-socket-systemd\.sh/,'Linux CI must execute the restricted socket ownership test');
 for(const expected of [
   '746999BAB0FE3839304A831A4BA021C190D8F20AF554ECC39D3B122DE3A8C21C',
   '1C44E77AB148DDFB174DE8041100EFC38C4F23500183FAFF88F9BADAC5782E3C',

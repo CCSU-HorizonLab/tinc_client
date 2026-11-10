@@ -9,10 +9,11 @@ pub fn uid() -> u32 {
 }
 pub fn secure_socket(path: &Path, owner: u32) -> io::Result<()> {
     let name = std::ffi::CString::new(path.as_os_str().as_bytes())?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     if unsafe { libc::chown(name.as_ptr(), owner, u32::MAX) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    Ok(())
 }
 pub fn verify_peer(stream: &tokio::net::UnixStream, expected: u32) -> io::Result<()> {
     if stream.peer_cred()?.uid() != expected {
