@@ -68,8 +68,12 @@ class TincLinkVpnService : VpnService() {
             val closeError = closeTun()
             val detail = closeError?.let { "；同时无法确认 TUN 已释放：$it" }.orEmpty()
             publish(VpnPhase.FAILED, "TUN 创建失败：${safeMessage(error)}$detail")
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
+            if (closeError == null) {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            } else {
+                updateNotification("TUN 清理失败，请返回应用重试")
+            }
         }
     }
 
@@ -79,11 +83,12 @@ class TincLinkVpnService : VpnService() {
         val closeError = closeTun()
         if (closeError == null) {
             publish(VpnPhase.IDLE, reason)
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
         } else {
             publish(VpnPhase.FAILED, "TUN 关闭失败，不能确认资源已经释放：$closeError")
+            updateNotification("TUN 关闭失败，请返回应用重试")
         }
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     override fun onRevoke() {
