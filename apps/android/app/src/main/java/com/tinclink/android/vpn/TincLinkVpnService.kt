@@ -158,11 +158,18 @@ class TincLinkVpnService : VpnService() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val stopVpn = PendingIntent.getService(
+            this,
+            1,
+            Intent(this, TincLinkVpnService::class.java).setAction(ACTION_STOP),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
         return Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle("TincLink Android")
             .setContentText(content)
             .setContentIntent(openApp)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "断开并释放", stopVpn)
             .setOngoing(true)
             .build()
     }
