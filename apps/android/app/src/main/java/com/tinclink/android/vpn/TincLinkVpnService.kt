@@ -65,8 +65,9 @@ class TincLinkVpnService : VpnService() {
             )
             updateNotification("TUN 已创建，等待 Tinc 引擎接入")
         } catch (error: Exception) {
-            closeTunQuietly()
-            publish(VpnPhase.FAILED, "TUN 创建失败：${safeMessage(error)}")
+            val closeError = closeTun()
+            val detail = closeError?.let { "；同时无法确认 TUN 已释放：$it" }.orEmpty()
+            publish(VpnPhase.FAILED, "TUN 创建失败：${safeMessage(error)}$detail")
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
@@ -75,8 +76,12 @@ class TincLinkVpnService : VpnService() {
     @Synchronized
     private fun stopVpn(reason: String) {
         publish(VpnPhase.STOPPING, "正在关闭 Android TUN")
-        closeTunQuietly()
-        publish(VpnPhase.IDLE, reason)
+        val closeError = closeTun()
+        if (closeError == null) {
+            publish(VpnPhase.IDLE, reason)
+        } else {
+            publish(VpnPhase.FAILED, "TUN 关闭失败，不能确认资源已经释放：$closeError")
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -88,8 +93,10 @@ class TincLinkVpnService : VpnService() {
 
     override fun onDestroy() {
         val previousPhase = VpnStatusStore.snapshot.phase
-        closeTunQuietly()
-        if (
+        val closeError = closeTun()
+        if (closeError != null) {
+            publish(VpnPhase.FAILED, "VPN 服务结束时 TUN 关闭失败：$closeError")
+        } else if (
             previousPhase == VpnPhase.STARTING ||
             previousPhase == VpnPhase.TUN_READY ||
             previousPhase == VpnPhase.STOPPING
@@ -99,15 +106,14 @@ class TincLinkVpnService : VpnService() {
         super.onDestroy()
     }
 
-    private fun closeTunQuietly() {
-        val current = tunInterface
-        tunInterface = null
-        if (current != null) {
-            try {
-                current.close()
-            } catch (_: IOException) {
-                // The descriptor is already detached from the data plane; status remains stopped.
-            }
+    private fun closeTun(): String? {
+        val current = tunInterface ?: return null
+        return try {
+            current.close()
+            tunInterface = null
+            null
+        } catch (error: IOException) {
+            safeMessage(error)
         }
     }
 
