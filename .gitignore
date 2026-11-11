@@ -3,6 +3,10 @@ target/
 target-linux/
 dist/
 apps/desktop/src-tauri/gen/
+apps/android/.gradle/
+apps/android/local.properties
+apps/android/**/build/
+apps/android/.idea/
 .tools/
 .runtime/
 *.log
