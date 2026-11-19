@@ -39,4 +39,14 @@ class VpnStatusStoreTest {
         assertEquals(true, VpnStatusStore.logs().first().endsWith("event-20"))
         assertEquals(true, VpnStatusStore.logs().last().endsWith("event-99"))
     }
+
+    @Test
+    fun statusMessagesRemoveControlCharactersAndStayBounded() {
+        assertEquals(
+            "第一行 第二行 结束",
+            sanitizeStatusMessage("第一行\r\n第二行\u0000\t结束"),
+        )
+        assertEquals("未提供状态详情", sanitizeStatusMessage(" \r\n\t"))
+        assertEquals(160, sanitizeStatusMessage("x".repeat(200)).length)
+    }
 }

@@ -31,7 +31,7 @@ object VpnStatusStore {
         private set
 
     fun publish(phase: VpnPhase, message: String, tunFd: Int? = null): VpnSnapshot {
-        val next = VpnSnapshot(phase, message, tunFd)
+        val next = VpnSnapshot(phase, sanitizeStatusMessage(message), tunFd)
         synchronized(lock) {
             snapshot = next
             entries.addLast("${next.updatedAt} [$phase] $message")
@@ -51,3 +51,25 @@ object VpnStatusStore {
         }
     }
 }
+
+internal fun sanitizeStatusMessage(message: String): String {
+    val normalized = StringBuilder(MAX_STATUS_MESSAGE_LENGTH)
+    var pendingSpace = false
+
+    for (character in message) {
+        if (character.isWhitespace() || character.isISOControl()) {
+            pendingSpace = normalized.isNotEmpty()
+            continue
+        }
+        if (pendingSpace && normalized.length < MAX_STATUS_MESSAGE_LENGTH - 1) {
+            normalized.append(' ')
+        }
+        pendingSpace = false
+        if (normalized.length >= MAX_STATUS_MESSAGE_LENGTH) break
+        normalized.append(character)
+    }
+
+    return normalized.toString().ifEmpty { "未提供状态详情" }
+}
+
+private const val MAX_STATUS_MESSAGE_LENGTH = 160

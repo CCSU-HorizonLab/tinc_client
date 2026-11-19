@@ -184,7 +184,7 @@ class TincLinkVpnService : VpnService() {
     }
 
     private fun safeMessage(error: Exception): String =
-        error.message?.take(160) ?: error.javaClass.simpleName
+        sanitizeStatusMessage(error.message ?: error.javaClass.simpleName)
 
     companion object {
         const val ACTION_START = "com.tinclink.android.action.START_VPN"
