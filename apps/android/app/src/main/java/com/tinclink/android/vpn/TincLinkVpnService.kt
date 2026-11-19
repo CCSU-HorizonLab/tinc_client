@@ -15,6 +15,7 @@ import java.io.IOException
 
 class TincLinkVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
+    private var tunCloseNeedsRetry = false
 
     override fun onCreate() {
         super.onCreate()
@@ -36,11 +37,16 @@ class TincLinkVpnService : VpnService() {
     @Synchronized
     private fun startVpn() {
         if (tunInterface != null) {
-            publish(
-                VpnPhase.TUN_READY,
-                "TUN 已存在；Phase 0 尚未接入 Tinc 数据面",
-                tunInterface?.fd,
-            )
+            if (tunCloseNeedsRetry) {
+                publish(VpnPhase.FAILED, "上次 TUN 关闭未完成，请先重试断开")
+                updateNotification("TUN 仍待清理，请返回应用重试")
+            } else {
+                publish(
+                    VpnPhase.TUN_READY,
+                    "TUN 已存在；Phase 0 尚未接入 Tinc 数据面",
+                    tunInterface?.fd,
+                )
+            }
             return
         }
 
@@ -58,6 +64,7 @@ class TincLinkVpnService : VpnService() {
                 ?: throw IllegalStateException("系统未建立 TUN；VPN 授权可能已失效")
 
             tunInterface = established
+            tunCloseNeedsRetry = false
             publish(
                 VpnPhase.TUN_READY,
                 "TUN 已创建；仅接管文档测试地址，尚未建立 Tinc 隧道",
@@ -116,8 +123,10 @@ class TincLinkVpnService : VpnService() {
         return try {
             current.close()
             tunInterface = null
+            tunCloseNeedsRetry = false
             null
         } catch (error: IOException) {
+            tunCloseNeedsRetry = true
             safeMessage(error)
         }
     }
