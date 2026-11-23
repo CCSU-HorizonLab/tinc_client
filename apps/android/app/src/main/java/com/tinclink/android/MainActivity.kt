@@ -10,16 +10,26 @@ import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.text.InputType
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import com.tinclink.android.auth.LoginInputValidation
+import com.tinclink.android.auth.LoginInputValidator
 import com.tinclink.android.vpn.TincLinkVpnService
 import com.tinclink.android.vpn.VpnPhase
 import com.tinclink.android.vpn.VpnStatusStore
 
 class MainActivity : Activity() {
+    private lateinit var serverInput: EditText
+    private lateinit var accessCodeInput: EditText
+    private lateinit var passwordInput: EditText
+    private lateinit var allowHttpInput: CheckBox
+    private lateinit var loginValidationView: TextView
     private lateinit var statusView: TextView
     private lateinit var logView: TextView
     private var receiverRegistered = false
@@ -98,6 +108,44 @@ class MainActivity : Activity() {
             textSize = 15f
         })
 
+        container.addView(TextView(this).apply {
+            text = "接入信息（仅本地校验）"
+            textSize = 18f
+            setPadding(0, padding, 0, 0)
+        })
+        serverInput = EditText(this).apply {
+            hint = "服务端根地址，例如 https://vpn.example.com"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setSingleLine(true)
+        }
+        container.addView(serverInput)
+        accessCodeInput = EditText(this).apply {
+            hint = "接入码，例如 TL-7K9M-2Q4F"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+            setSingleLine(true)
+        }
+        container.addView(accessCodeInput)
+        passwordInput = EditText(this).apply {
+            hint = "节点密码"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSaveEnabled = false
+            setSingleLine(true)
+        }
+        container.addView(passwordInput)
+        allowHttpInput = CheckBox(this).apply {
+            text = "测试环境允许 HTTP 地址（仅格式校验）"
+        }
+        container.addView(allowHttpInput)
+        container.addView(Button(this).apply {
+            text = "校验接入信息（不发送）"
+            setOnClickListener { validateLoginInput() }
+        })
+        loginValidationView = TextView(this).apply {
+            text = "尚未校验，也未向服务端发送任何数据"
+            setPadding(0, 0, 0, padding)
+        }
+        container.addView(loginValidationView)
+
         statusView = TextView(this).apply {
             textSize = 17f
             setPadding(0, padding, 0, padding)
@@ -125,6 +173,27 @@ class MainActivity : Activity() {
         container.addView(logView)
 
         return ScrollView(this).apply { addView(container) }
+    }
+
+    private fun validateLoginInput() {
+        when (
+            val result = LoginInputValidator.validate(
+                server = serverInput.text.toString(),
+                accessCode = accessCodeInput.text.toString(),
+                password = passwordInput.text.toString(),
+                allowHttp = allowHttpInput.isChecked,
+            )
+        ) {
+            is LoginInputValidation.Valid -> {
+                serverInput.setText(result.input.serverOrigin)
+                accessCodeInput.setText(result.input.accessCode)
+                loginValidationView.text = "格式校验通过；尚未向服务端登录，也未保存密码"
+            }
+
+            is LoginInputValidation.Invalid -> {
+                loginValidationView.text = "格式校验失败：${result.message}"
+            }
+        }
     }
 
     private fun beginVpnStart() {

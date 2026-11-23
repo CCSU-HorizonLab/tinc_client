@@ -6,6 +6,8 @@ desktop clients and does not yet contain a Tinc protocol engine.
 ## What Phase 0 proves
 
 - The app asks Android for VPN consent through `VpnService.prepare`.
+- Server origin, access code, and password are validated locally without sending or persisting
+  credentials.
 - A foreground `VpnService` creates a non-blocking TUN file descriptor.
 - Only `192.0.2.1/32` (a documentation-only address) is routed to the Phase 0 TUN.
 - The descriptor is retained by the service and closed on user stop, service teardown, or
