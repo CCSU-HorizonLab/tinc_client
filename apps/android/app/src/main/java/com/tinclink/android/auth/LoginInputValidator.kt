@@ -3,11 +3,14 @@ package com.tinclink.android.auth
 import java.net.URI
 import java.util.Locale
 
-data class ValidatedLoginInput(
+class ValidatedLoginInput(
     val serverOrigin: String,
     val accessCode: String,
     val password: String,
-)
+) {
+    override fun toString(): String =
+        "ValidatedLoginInput(serverOrigin=$serverOrigin, accessCode=$accessCode, password=<redacted>)"
+}
 
 sealed interface LoginInputValidation {
     data class Valid(val input: ValidatedLoginInput) : LoginInputValidation

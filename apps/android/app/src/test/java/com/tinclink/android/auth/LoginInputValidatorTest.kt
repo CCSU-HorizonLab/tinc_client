@@ -1,6 +1,7 @@
 package com.tinclink.android.auth
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -47,5 +48,17 @@ class LoginInputValidatorTest {
 
         assertTrue(valid is LoginInputValidation.Valid)
         assertTrue(tooLarge is LoginInputValidation.Invalid)
+    }
+
+    @Test
+    fun validatedInputNeverPrintsThePassword() {
+        val result = LoginInputValidator.validate(
+            "https://vpn.example.com",
+            "TL-7K9M-2Q4F",
+            "do-not-log-this",
+        ) as LoginInputValidation.Valid
+
+        assertFalse(result.toString().contains("do-not-log-this"))
+        assertTrue(result.toString().contains("password=<redacted>"))
     }
 }
