@@ -187,7 +187,9 @@ class MainActivity : Activity() {
             is LoginInputValidation.Valid -> {
                 serverInput.setText(result.input.serverOrigin)
                 accessCodeInput.setText(result.input.accessCode)
-                loginValidationView.text = "格式校验通过；尚未向服务端登录，也未保存密码"
+                passwordInput.text.clear()
+                loginValidationView.text =
+                    "格式校验通过；尚未向服务端登录，密码已从输入框清除"
             }
 
             is LoginInputValidation.Invalid -> {
