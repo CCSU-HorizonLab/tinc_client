@@ -20,6 +20,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import com.tinclink.android.auth.LoginInputValidation
 import com.tinclink.android.auth.LoginInputValidator
 import com.tinclink.android.vpn.TincLinkVpnService
@@ -244,12 +245,12 @@ class MainActivity : Activity() {
 
     private fun registerStatusReceiver() {
         val filter = IntentFilter(TincLinkVpnService.ACTION_STATUS_CHANGED)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(statusReceiver, filter, RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(statusReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            statusReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         receiverRegistered = true
     }
 
