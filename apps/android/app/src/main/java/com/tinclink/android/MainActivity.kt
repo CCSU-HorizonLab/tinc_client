@@ -11,7 +11,9 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.text.InputType
+import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -43,6 +45,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         setContentView(buildContentView())
         renderStatus()
     }
@@ -129,6 +132,7 @@ class MainActivity : Activity() {
             hint = "节点密码"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             isSaveEnabled = false
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             setSingleLine(true)
         }
         container.addView(passwordInput)
