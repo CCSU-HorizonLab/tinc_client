@@ -20,16 +20,9 @@ Android-to-Windows/Linux connectivity.
 ## Required local toolchain
 
 - JDK 17 or newer (the repository machine currently has JDK 21)
-- Android Studio with Android SDK Platform 36
-- Android SDK Build-Tools 36.x and Platform-Tools (`adb`)
-- Gradle 8.13 (required by Android Gradle Plugin 8.13.2)
-
-The Gradle wrapper binary is intentionally not generated on a machine without a trusted Gradle
-installation. After installing the toolchain, run this once from this directory:
-
-```text
-gradle wrapper --gradle-version 8.13
-```
+- Android Studio or the official Android SDK command-line tools with SDK Platform 36
+- Android SDK Build-Tools 35.0.0 or newer and Platform-Tools (`adb`)
+- Gradle 8.13, downloaded and checksum-verified by the committed Gradle wrapper
 
 ## Build and test
 
@@ -38,6 +31,8 @@ gradle wrapper --gradle-version 8.13
 ./gradlew lintDebug
 ./gradlew assembleDebug
 ```
+
+On Windows, use `gradlew.bat` in place of `./gradlew`.
 
 Expected APK:
 
