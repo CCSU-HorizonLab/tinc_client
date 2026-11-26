@@ -6,8 +6,11 @@ desktop clients and does not yet contain a Tinc protocol engine.
 ## What Phase 0 proves
 
 - The app asks Android for VPN consent through `VpnService.prepare`.
-- Server origin, access code, and password are validated locally without sending or persisting
-  credentials.
+- Server origin, access code, and password are validated locally. A separate login probe sends
+  them to `/api/tinc/client/login` and displays only the returned node identity. The token is
+  validated then discarded; this login does not authorize or start a VPN session.
+- The Debug build permits explicitly selected HTTP origins for isolated testing; release builds
+  require HTTPS. Never enter a production password over HTTP.
 - A foreground `VpnService` creates a non-blocking TUN file descriptor.
 - Only `192.0.2.1/32` (a documentation-only address) is routed to the Phase 0 TUN.
 - The descriptor is retained by the service and closed on user stop, service teardown, or
@@ -57,6 +60,9 @@ adb logcat -d -s AndroidRuntime ActivityManager Vpn
 ```
 
 Do not reuse a Windows/Linux node ID, virtual IP, private key, or profile for this test.
+To test login separately, enter an Android-specific access code and password, press
+**测试服务端登录（不启动 VPN）**, and confirm the displayed node name and IP. This does not
+prove VPN connectivity.
 
 ## Next integration boundary
 

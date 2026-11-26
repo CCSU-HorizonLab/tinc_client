@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
@@ -23,6 +24,8 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import com.tinclink.android.auth.LoginInputValidation
 import com.tinclink.android.auth.LoginInputValidator
+import com.tinclink.android.auth.LoginApi
+import com.tinclink.android.auth.LoginResult
 import com.tinclink.android.vpn.TincLinkVpnService
 import com.tinclink.android.vpn.VpnPhase
 import com.tinclink.android.vpn.VpnStatusStore
@@ -37,6 +40,7 @@ class MainActivity : Activity() {
     private lateinit var logView: TextView
     private var receiverRegistered = false
     private var startPendingAfterNotificationRequest = false
+    private var loginInFlight = false
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -113,7 +117,7 @@ class MainActivity : Activity() {
         })
 
         container.addView(TextView(this).apply {
-            text = "接入信息（仅本地校验）"
+            text = "接入信息"
             textSize = 18f
             setPadding(0, padding, 0, 0)
         })
@@ -138,12 +142,16 @@ class MainActivity : Activity() {
         }
         container.addView(passwordInput)
         allowHttpInput = CheckBox(this).apply {
-            text = "测试环境允许 HTTP 地址（仅格式校验）"
+            text = "测试环境允许 HTTP 地址（仅 Debug 版本）"
         }
         container.addView(allowHttpInput)
         container.addView(Button(this).apply {
             text = "校验接入信息（不发送）"
             setOnClickListener { validateLoginInput() }
+        })
+        container.addView(Button(this).apply {
+            text = "测试服务端登录（不启动 VPN）"
+            setOnClickListener { testServerLogin() }
         })
         loginValidationView = TextView(this).apply {
             text = "尚未校验，也未向服务端发送任何数据"
@@ -201,6 +209,45 @@ class MainActivity : Activity() {
                 loginValidationView.text = "格式校验失败：${result.message}"
             }
         }
+    }
+
+    private fun testServerLogin() {
+        if (loginInFlight) return
+        val validation = LoginInputValidator.validate(
+            serverInput.text.toString(),
+            accessCodeInput.text.toString(),
+            passwordInput.text.toString(),
+            allowHttpInput.isChecked,
+        )
+        if (validation is LoginInputValidation.Invalid) {
+            loginValidationView.text = "格式校验失败：${validation.message}"
+            return
+        }
+        val input = (validation as LoginInputValidation.Valid).input
+        if (input.serverOrigin.startsWith("http://") &&
+            applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE == 0
+        ) {
+            passwordInput.text.clear()
+            loginValidationView.text = "正式版本只允许 HTTPS 登录"
+            return
+        }
+        serverInput.setText(input.serverOrigin)
+        accessCodeInput.setText(input.accessCode)
+        passwordInput.text.clear()
+        loginInFlight = true
+        loginValidationView.text = "正在验证服务端身份；此操作不会启动 VPN"
+        Thread {
+            val result = LoginApi.login(input)
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                loginInFlight = false
+                loginValidationView.text = when (result) {
+                    is LoginResult.Success ->
+                        "服务端登录成功：${result.netName} / ${result.sid} / ${result.nodeIp}；尚未连接 VPN"
+                    is LoginResult.Failure -> result.message
+                }
+            }
+        }.start()
     }
 
     private fun beginVpnStart() {

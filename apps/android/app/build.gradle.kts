@@ -11,8 +11,8 @@ android {
         applicationId = "com.tinclink.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0-phase0"
+        versionCode = 2
+        versionName = "0.1.1-phase0"
 
     }
 
@@ -43,4 +43,5 @@ android {
 dependencies {
     implementation("androidx.core:core:1.17.0")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }
