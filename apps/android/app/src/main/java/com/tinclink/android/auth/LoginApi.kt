@@ -5,7 +5,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 sealed interface LoginResult {
-    data class Success(val sid: String, val netName: String, val nodeIp: String) : LoginResult
+    data class Success(
+        val sid: String,
+        val netName: String,
+        val nodeIp: String,
+        val authorizedRouteCount: Int,
+    ) : LoginResult
     data class Failure(val message: String) : LoginResult
 }
 
@@ -77,12 +82,42 @@ object LoginApi {
             ) {
                 return LoginResult.Failure("服务端返回的接入码不匹配")
             }
-            if (!nodeIp.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}")) ||
-                nodeIp.split('.').any { it.toInt() > 255 }
-            ) {
+            if (ipv4Octets(nodeIp) == null) {
                 return LoginResult.Failure("服务端返回的节点 IP 无效")
             }
-            LoginResult.Success(sid, netName, nodeIp)
+            val routes = json.optJSONArray("allowed_routes")
+                ?: return LoginResult.Failure("登录响应缺少授权路由快照")
+            if (routes.length() > 1024) {
+                return LoginResult.Failure("授权路由数量超出安全上限")
+            }
+            val revision = json.requiredString("route_revision")
+            if (revision.length > 256 || revision.trim() != revision ||
+                revision.any { it.code !in 33..126 }
+            ) {
+                return LoginResult.Failure("路由版本格式无效")
+            }
+            val lease = json.opt("route_lease_seconds")
+            if (lease !is Int || lease !in 30..3600) {
+                return LoginResult.Failure("路由租约无效")
+            }
+            val uniqueRoutes = HashSet<String>()
+            for (index in 0 until routes.length()) {
+                val route = routes.opt(index) as? String
+                    ?: return LoginResult.Failure("授权路由格式无效")
+                if (!route.endsWith("/32") || route.trim() != route) {
+                    return LoginResult.Failure("授权路由仅允许 IPv4 /32")
+                }
+                val address = route.removeSuffix("/32")
+                val octets = ipv4Octets(address)
+                    ?: return LoginResult.Failure("授权路由包含无效 IP")
+                if (address == nodeIp || octets[0] == 0 || octets[0] == 127 ||
+                    octets[0] >= 224 || (octets[0] == 169 && octets[1] == 254)
+                ) {
+                    return LoginResult.Failure("授权路由包含不允许的目标")
+                }
+                uniqueRoutes.add(route)
+            }
+            LoginResult.Success(sid, netName, nodeIp, uniqueRoutes.size)
         } catch (_: Exception) {
             LoginResult.Failure("登录响应缺少有效节点身份")
         }
@@ -91,4 +126,15 @@ object LoginApi {
     private fun JSONObject.requiredString(key: String): String =
         (opt(key) as? String)?.takeIf { it.isNotBlank() }
             ?: throw IllegalArgumentException("Missing $key")
+
+    private fun ipv4Octets(value: String): List<Int>? {
+        val parts = value.split('.')
+        if (parts.size != 4) return null
+        return parts.map { part ->
+            if (part.isEmpty() || part.length > 3 || part.any { it !in '0'..'9' }) return null
+            val octet = part.toIntOrNull() ?: return null
+            if (octet !in 0..255 || octet.toString() != part) return null
+            octet
+        }
+    }
 }

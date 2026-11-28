@@ -17,7 +17,7 @@ class LoginApiTest {
     @Test
     fun acceptsServerContractWithoutExposingToken() {
         val result = LoginApi.parseSuccess(valid, "TL-7K9M-2Q4F")
-        assertEquals(LoginResult.Success("android_a", "office", "10.0.11.213"), result)
+        assertEquals(LoginResult.Success("android_a", "office", "10.0.11.213", 1), result)
         assertFalse(result.toString().contains("secret-token"))
     }
 
@@ -32,6 +32,17 @@ class LoginApiTest {
     fun rejectedOrMalformedResponsesNeverReportSuccess() {
         assertTrue(LoginApi.parseSuccess(valid.replace("\"status\":1", "\"status\":0"), "TL-7K9M-2Q4F") is LoginResult.Failure)
         assertTrue(LoginApi.parseSuccess("{", "TL-7K9M-2Q4F") is LoginResult.Failure)
+    }
+
+    @Test
+    fun incompleteOrUnsafeRouteSnapshotsNeverReportSuccess() {
+        val missingRoutes = valid.replace("\"allowed_routes\":[\"10.0.11.1/32\"],", "")
+        val invalidLease = valid.replace("\"route_lease_seconds\":120", "\"route_lease_seconds\":29")
+        val ownRoute = valid.replace("10.0.11.1/32", "10.0.11.213/32")
+        val wideRoute = valid.replace("10.0.11.1/32", "10.0.11.0/24")
+        for (response in listOf(missingRoutes, invalidLease, ownRoute, wideRoute)) {
+            assertTrue(LoginApi.parseSuccess(response, "TL-7K9M-2Q4F") is LoginResult.Failure)
+        }
     }
 
     @Test

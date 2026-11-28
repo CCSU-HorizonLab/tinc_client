@@ -8,7 +8,8 @@ desktop clients and does not yet contain a Tinc protocol engine.
 - The app asks Android for VPN consent through `VpnService.prepare`.
 - Server origin, access code, and password are validated locally. A separate login probe sends
   them to `/api/tinc/client/login` and displays only the returned node identity. The token is
-  validated then discarded; this login does not authorize or start a VPN session.
+  validated then discarded. The route snapshot is checked and its count displayed, but no
+  operating-system route is installed; this login does not start a VPN session.
 - The Debug build permits explicitly selected HTTP origins for isolated testing; release builds
   require HTTPS. Never enter a production password over HTTP.
 - A foreground `VpnService` creates a non-blocking TUN file descriptor.

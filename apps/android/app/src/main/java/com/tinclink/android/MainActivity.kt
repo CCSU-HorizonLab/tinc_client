@@ -243,7 +243,7 @@ class MainActivity : Activity() {
                 loginInFlight = false
                 loginValidationView.text = when (result) {
                     is LoginResult.Success ->
-                        "服务端登录成功：${result.netName} / ${result.sid} / ${result.nodeIp}；尚未连接 VPN"
+                        "服务端登录成功：${result.netName} / ${result.sid} / ${result.nodeIp}；收到 ${result.authorizedRouteCount} 条授权路由，尚未安装路由或连接 VPN"
                     is LoginResult.Failure -> result.message
                 }
             }
